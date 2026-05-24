@@ -56,6 +56,13 @@ MAX_PRICE_DOG = int(os.getenv("MAX_PRICE_DOG", "110"))
 ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "720"))
 EDGE_IMPROVEMENT_TO_REPEAT = float(os.getenv("EDGE_IMPROVEMENT_TO_REPEAT", "0.7"))
 
+# Live-evidence gates:
+# Prevents false pregame / first-pitch alerts when there is no real game data yet.
+MIN_LIVE_PITCHES_FOR_STRIKE = int(os.getenv("MIN_LIVE_PITCHES_FOR_STRIKE", "18"))
+MIN_BALLS_IN_PLAY_FOR_STRIKE = int(os.getenv("MIN_BALLS_IN_PLAY_FOR_STRIKE", "2"))
+MIN_REAL_SIGNAL_COUNT = int(os.getenv("MIN_REAL_SIGNAL_COUNT", "2"))
+MIN_INNING_FOR_NEUTRAL_ALERT = int(os.getenv("MIN_INNING_FOR_NEUTRAL_ALERT", "99"))
+
 ODDS_MARKETS = os.getenv("ODDS_MARKETS", "totals")
 
 TEAM_MAP = {
@@ -1245,12 +1252,95 @@ def find_markets(odds_events, home, away):
     return empty
 
 
-def detect_total_opportunity(market, info, projected_total, scenario, scores):
+
+def live_evidence_report(info, p, q, traffic, scores, scenario):
+    """
+    Prevents false STRIKE alerts caused only by lineup pressure or full game opportunity
+    before real live baseball evidence exists.
+    """
+    total_pitches = q.get("total_pitches", 0)
+    balls_in_play = q.get("balls_in_play", 0)
+    pitch_count = p.get("pitch_count", 0)
+    batters_faced = p.get("batters_faced", 0)
+
+    signals = []
+    real_signal_count = 0
+
+    checks = [
+        ("pitcher stress", scores.get("pitcher_stress", 0) >= 50),
+        ("contact quality", scores.get("contact_quality", 0) >= 50),
+        ("current inning pressure", scores.get("current_inning_pressure", 0) >= 60),
+        ("bullpen risk", scores.get("bullpen_risk", 0) >= 55),
+        ("run suppression", scores.get("run_suppression", 0) >= 55),
+        ("false dominance", scores.get("false_dominance", 0) >= 50),
+        ("recent traffic", traffic.get("recent_baserunners", 0) >= 3),
+        ("consecutive baserunners", traffic.get("consecutive_baserunners", 0) >= 2),
+    ]
+
+    for label, passed in checks:
+        if passed:
+            real_signal_count += 1
+            signals.append(label)
+
+    if pitch_count == 0 or batters_faced == 0:
+        return {
+            "ok": False,
+            "reason": "no live pitching data yet",
+            "real_signal_count": real_signal_count,
+            "signals": signals,
+        }
+
+    if info.get("inning", 1) == 1 and info.get("total_runs", 0) == 0:
+        if total_pitches < MIN_LIVE_PITCHES_FOR_STRIKE and balls_in_play < MIN_BALLS_IN_PLAY_FOR_STRIKE:
+            return {
+                "ok": False,
+                "reason": "too early in 1st inning without live evidence",
+                "real_signal_count": real_signal_count,
+                "signals": signals,
+            }
+
+    if scenario == "Neutral / Watch" and info.get("inning", 1) < MIN_INNING_FOR_NEUTRAL_ALERT:
+        return {
+            "ok": False,
+            "reason": "neutral scenario is watch-only",
+            "real_signal_count": real_signal_count,
+            "signals": signals,
+        }
+
+    if total_pitches < MIN_LIVE_PITCHES_FOR_STRIKE and balls_in_play < MIN_BALLS_IN_PLAY_FOR_STRIKE:
+        return {
+            "ok": False,
+            "reason": "not enough pitches or balls in play",
+            "real_signal_count": real_signal_count,
+            "signals": signals,
+        }
+
+    if real_signal_count < MIN_REAL_SIGNAL_COUNT:
+        return {
+            "ok": False,
+            "reason": "not enough independent live signals",
+            "real_signal_count": real_signal_count,
+            "signals": signals,
+        }
+
+    return {
+        "ok": True,
+        "reason": "live evidence confirmed",
+        "real_signal_count": real_signal_count,
+        "signals": signals,
+    }
+
+
+def detect_total_opportunity(market, info, projected_total, scenario, scores, p, q, traffic):
     live = market.get("point")
     over_price = market.get("over_price")
     under_price = market.get("under_price")
 
     if live is None:
+        return None
+
+    evidence = live_evidence_report(info, p, q, traffic, scores, scenario)
+    if not evidence["ok"]:
         return None
 
     edge = round(projected_total - live, 1)
@@ -1278,6 +1368,7 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores):
         "scenario": scenario,
         "scores": scores,
         "projected_total": projected_total,
+        "evidence": evidence,
     }
 
 
@@ -1288,6 +1379,8 @@ def should_alert(state_game, opportunity):
     key = f"{opportunity['market_type']}|{opportunity['side']}"
     scenario = opportunity["scenario"]
     edge = abs(opportunity["edge"])
+    line = opportunity.get("line")
+    price = opportunity.get("price")
 
     for a in reversed(alerts):
         if a.get("key") != key:
@@ -1295,8 +1388,14 @@ def should_alert(state_game, opportunity):
 
         seconds_since = now_ts - a.get("ts", 0)
         same_scenario = a.get("scenario") == scenario
+        same_line = a.get("line") == line
         edge_improved = edge >= a.get("edge_abs", 0) + EDGE_IMPROVEMENT_TO_REPEAT
 
+        # Do not resend the same side/same line just because price moved slightly.
+        if seconds_since < ALERT_COOLDOWN_SECONDS and same_line and not edge_improved:
+            return False
+
+        # Do not spam same scenario inside cooldown unless edge materially improves.
         if seconds_since < ALERT_COOLDOWN_SECONDS and same_scenario and not edge_improved:
             return False
 
@@ -1305,7 +1404,8 @@ def should_alert(state_game, opportunity):
         "key": key,
         "scenario": scenario,
         "edge_abs": edge,
-        "line": opportunity.get("line"),
+        "line": line,
+        "price": price,
     })
     return True
 
@@ -1406,7 +1506,8 @@ def format_alert(label, start_label, info, market_context, opportunity, p, q, tr
         f"Lineup Pressure: {scores['lineup_pressure']}/100\n"
         f"Bullpen Risk: {scores['bullpen_risk']}/100\n"
         f"Run Suppression: {scores['run_suppression']}/100\n"
-        f"False Dominance: {scores['false_dominance']}/100\n\n"
+        f"False Dominance: {scores['false_dominance']}/100\n"
+        f"Live Evidence: {opportunity.get('evidence', {}).get('real_signal_count', 0)} signal(s) - {opportunity.get('evidence', {}).get('reason', 'unknown')}\n\n"
         f"Why:\n"
         f"{reason_text}\n\n"
         f"Pitcher:\n"
@@ -1558,6 +1659,9 @@ def main():
                     projected_total,
                     scenario,
                     scores,
+                    p,
+                    q,
+                    traffic,
                 )
 
                 edge_for_sleep = abs(opportunity["edge"]) if opportunity else 0
