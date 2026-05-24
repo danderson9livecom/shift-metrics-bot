@@ -56,7 +56,7 @@ MAX_PRICE_DOG = int(os.getenv("MAX_PRICE_DOG", "110"))
 ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "720"))
 EDGE_IMPROVEMENT_TO_REPEAT = float(os.getenv("EDGE_IMPROVEMENT_TO_REPEAT", "0.7"))
 
-ODDS_MARKETS = os.getenv("ODDS_MARKETS", "totals,team_totals")
+ODDS_MARKETS = os.getenv("ODDS_MARKETS", "totals")
 
 TEAM_MAP = {
     "Oakland Athletics": "Athletics",
@@ -1442,7 +1442,21 @@ def main():
 
         try:
             games = get_schedule()
-            odds = get_odds()
+
+            # Credit-smart odds usage:
+            # Only call the Odds API when at least one game is inside the pregame window
+            # or already active. If all games are too far away, stay dormant and skip odds.
+            needs_odds = False
+            for sg in games:
+                st = parse_start_time(sg)
+                if st is None or should_fetch_feed(st):
+                    needs_odds = True
+                    break
+
+            odds = get_odds() if needs_odds else []
+            if not needs_odds:
+                print("ODDS SKIPPED: all games outside pregame window.")
+
             print(f"\n--- SHIFT V2 CHECK {now_local().strftime('%I:%M:%S %p')} ---")
 
             for g in games:
@@ -1595,4 +1609,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-# force update Sun May 24 08:17:22 MST 2026
