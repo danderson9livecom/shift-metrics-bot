@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V2.2.2 RUNTIME SAFE
+SHIFT MLB V2.2.3 SMS SAFE
 
 Professional live MLB totals monitor.
 V2.2.1 adds:
@@ -83,6 +83,11 @@ EDGE_IMPROVEMENT_TO_REPEAT = float(os.getenv("EDGE_IMPROVEMENT_TO_REPEAT", "0.7"
 SEND_WATCH_ALERTS = os.getenv("SEND_WATCH_ALERTS", "true").lower() == "true"
 MAX_ALERTS_PER_GAME_SIDE = int(os.getenv("MAX_ALERTS_PER_GAME_SIDE", "2"))
 LINE_IMPROVEMENT_TO_REPEAT = float(os.getenv("LINE_IMPROVEMENT_TO_REPEAT", "1.0"))
+
+# SMS safety:
+# Twilio rejects message bodies over 1600 characters.
+# Keep texts short; keep full details in Railway logs.
+MAX_SMS_CHARS = int(os.getenv("MAX_SMS_CHARS", "1350"))
 
 # Professional decision-layer gates
 MIN_STRIKE_CONFIDENCE = int(os.getenv("MIN_STRIKE_CONFIDENCE", "64"))
@@ -231,14 +236,100 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
+
+def compact_sms_message(msg, max_chars=MAX_SMS_CHARS):
+    """
+    Twilio hard rejects long message bodies.
+    This keeps the FULL alert printed in Railway logs while sending
+    a compact SMS that stays under the limit.
+    """
+    if not msg:
+        return msg
+
+    if len(msg) <= max_chars:
+        return msg
+
+    lines = [ln.rstrip() for ln in msg.splitlines() if ln.strip()]
+    keep_prefixes = (
+        "SHIFT",
+        "PLAY:",
+        "Market:",
+        "Scenario:",
+        "Instruction:",
+        "Open:",
+        "Live Line:",
+        "Proj:",
+        "Edge:",
+        "Entry Guidance:",
+        "Score:",
+        "Inning:",
+        "Base/Out:",
+        "Confidence:",
+        "CIP:",
+        "RO:",
+        "Stress:",
+        "Dom:",
+        "Contact:",
+        "Lineup:",
+        "Conv:",
+        "P2R:",
+        "PreOver:",
+        "OVal:",
+        "Prev:",
+        "PredMove:",
+    )
+
+    compact = []
+    # Always keep the header and matchup block.
+    for ln in lines[:8]:
+        compact.append(ln)
+
+    # Keep key scoring/decision lines.
+    for ln in lines[8:]:
+        if ln.startswith(keep_prefixes):
+            compact.append(ln)
+
+    # Keep the strongest "why" bullets only.
+    why_lines = [ln for ln in lines if ln.startswith("•")]
+    if why_lines:
+        compact.append("Why:")
+        compact.extend(why_lines[:5])
+
+    # Keep only the first pitch-type flag line if present.
+    for idx, ln in enumerate(lines):
+        if ln.startswith("Pitch-Type Flags:"):
+            compact.append("Pitch-Type Flags:")
+            if idx + 1 < len(lines):
+                compact.append(lines[idx + 1])
+            break
+
+    text = "\n".join(compact)
+
+    if len(text) <= max_chars:
+        return text
+
+    # Final hard cap.
+    return text[: max_chars - 90].rstrip() + "\n\n[Trimmed for SMS. Full alert in Railway logs.]"
+
+
+
 def send_text(msg):
+    # Full alert stays in Railway logs.
     print("\n" + msg + "\n")
+
+    # SMS must stay under Twilio's limit.
+    sms_body = compact_sms_message(msg)
+    if len(sms_body) > MAX_SMS_CHARS:
+        sms_body = sms_body[:MAX_SMS_CHARS - 40].rstrip() + "\n[Trimmed]"
+
+    print(f"SMS LENGTH: {len(sms_body)} chars")
+
     if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, ALERT_TO_NUMBER]):
         print("TEXT NOT SENT: Missing Twilio variables.")
         return
     try:
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        client.messages.create(body=msg, from_=TWILIO_FROM_NUMBER, to=ALERT_TO_NUMBER)
+        client.messages.create(body=sms_body, from_=TWILIO_FROM_NUMBER, to=ALERT_TO_NUMBER)
         print("TEXT SENT SUCCESSFULLY")
     except Exception as e:
         print("TEXT ERROR:", repr(e))
@@ -1770,42 +1861,6 @@ def over_value_score(opening, live, edge, scores):
     return round(clamp(score))
 
 
-
-def apply_predictive_defaults(scores):
-    """
-    Runtime safety helper.
-    Guarantees the new V2.2.1/V2.2.2 predictive keys exist before any alert,
-    log, or opportunity function can read them.
-    """
-    defaults = {
-        "pressure_to_runs": 0,
-        "pre_run_over_watch": 0,
-        "over_value": 0,
-        "predictive_market_move": 0,
-        "run_conversion": 0,
-        "run_prevention": 0,
-        "fake_pressure": 0,
-        "under_environment": 0,
-        "market_resistance": 0,
-        "current_inning_pressure": 0,
-        "remaining_opportunity": 0,
-        "pitcher_stress": 0,
-        "dominance": 0,
-        "contact_quality": 0,
-        "contact_trend": 50,
-        "lineup_pressure": 0,
-        "bullpen_risk": 0,
-        "starter_exit_probability": 0,
-        "times_through_order": 0,
-        "blowout_kill": 0,
-        "run_suppression": 0,
-        "false_dominance": 0,
-    }
-    for key, value in defaults.items():
-        scores.setdefault(key, value)
-    return scores
-
-
 def confidence_score(side, edge, scenario, scores, evidence, market_resistance):
     """
     Converts the signal stack into a confidence grade used for WATCH/STRIKE.
@@ -1943,10 +1998,6 @@ def expected_future_runs(
     upward += (starter_exit / 100) * 0.45
     upward += (max(0, market_resistance) / 100) * 0.60
     upward += (run_conversion / 100) * 0.90
-    pressure_to_runs = safe_float(pressure_to_runs, 0)
-    pre_run_over_watch = safe_float(pre_run_over_watch, 0)
-    predictive_market_move = safe_float(predictive_market_move, 0)
-
     upward += (pressure_to_runs / 100) * 0.75
     upward += (pre_run_over_watch / 100) * 0.55
     upward += (max(0, predictive_market_move) / 100) * 0.45
@@ -2496,8 +2547,7 @@ def describe_reasons(info, p, q, traffic, hitters, scores, scenario):
 
 
 def format_alert(label, start_label, info, market_context, opportunity, p, q, traffic, hitters, flags):
-    scores = apply_predictive_defaults(opportunity["scores"])
-    opportunity["scores"] = scores
+    scores = opportunity["scores"]
     reasons = describe_reasons(info, p, q, traffic, hitters, scores, opportunity["scenario"])
     reason_text = "\n".join([f"• {r}" for r in reasons])
 
@@ -2517,7 +2567,7 @@ def format_alert(label, start_label, info, market_context, opportunity, p, q, tr
     )
 
     return (
-        f"SHIFT MLB V2.2.2 RUNTIME SAFE {action}\n\n"
+        f"SHIFT MLB V2.2.3 SMS SAFE {action}\n\n"
         f"{label}\n"
         f"Start: {start_label}\n\n"
         f"Instruction:\n"
@@ -2531,33 +2581,33 @@ def format_alert(label, start_label, info, market_context, opportunity, p, q, tr
         f"Price Label: {market_label(opportunity['price'])}\n"
         f"Edge Grade: {opportunity['edge_grade']}\n"
         f"Confidence: {opportunity.get('confidence', 'N/A')}/100\n\n"
-        f"Opening/First Captured Total: {market_context.get('opening_total')}\n"
+        f"Open: {market_context.get('opening_total')}\n"
         f"Live Line: {opportunity['line']}\n"
-        f"Projected Final: {opportunity['projected_total']}\n"
-        f"Model Edge: {edge_sign}{opportunity['edge']} runs\n"
+        f"Proj: {opportunity['projected_total']}\n"
+        f"Edge: {edge_sign}{opportunity['edge']} runs\n"
         f"Entry Guidance: {entry_guidance}\n\n"
         f"Score: {info['away_runs']}-{info['home_runs']}\n"
         f"Inning: {info['inning_state']} {info['inning']}\n"
         f"Base/Out: {info['base_state']['label']}, {info['outs']} out(s)\n\n"
         f"Scores:\n"
-        f"Current Inning Pressure: {scores['current_inning_pressure']}/100\n"
-        f"Remaining Opportunity: {scores['remaining_opportunity']}/100\n"
-        f"Pitcher Stress: {scores['pitcher_stress']}/100\n"
-        f"Pitcher Dominance: {scores['dominance']}/100\n"
-        f"Contact Quality: {scores['contact_quality']}/100\n"
+        f"CIP: {scores['current_inning_pressure']}/100\n"
+        f"RO: {scores['remaining_opportunity']}/100\n"
+        f"Stress: {scores['pitcher_stress']}/100\n"
+        f"Dom: {scores['dominance']}/100\n"
+        f"Contact: {scores['contact_quality']}/100\n"
         f"Contact Trend: {scores.get('contact_trend', 0)}/100\n"
-        f"Lineup Pressure: {scores['lineup_pressure']}/100\n"
+        f"Lineup: {scores['lineup_pressure']}/100\n"
         f"Bullpen Risk: {scores['bullpen_risk']}/100\n"
         f"Starter Exit: {scores.get('starter_exit_probability', 0)}/100\n"
         f"Times Through Order: {scores.get('times_through_order', 0)}/100\n"
         f"Fake Pressure: {scores.get('fake_pressure', 0)}/100\n"
         f"Under Environment: {scores.get('under_environment', 0)}/100\n"
-        f"Run Conversion: {scores.get('run_conversion', 0)}/100\n"
-        f"Pressure-to-Runs: {scores.get('pressure_to_runs', 0)}/100\n"
-        f"Pre-Run OVER Watch: {scores.get('pre_run_over_watch', 0)}/100\n"
-        f"Over Value: {scores.get('over_value', 0)}/100\n"
-        f"Run Prevention: {scores.get('run_prevention', 0)}/100\n"
-        f"Predictive Market Move: {scores.get('predictive_market_move', 0)}/100\n"
+        f"Conv: {scores.get('run_conversion', 0)}/100\n"
+        f"P2R: {scores.get('pressure_to_runs', 0)}/100\n"
+        f"PreOver: {scores.get('pre_run_over_watch', 0)}/100\n"
+        f"OVal: {scores.get('over_value', 0)}/100\n"
+        f"Prev: {scores.get('run_prevention', 0)}/100\n"
+        f"PredMove: {scores.get('predictive_market_move', 0)}/100\n"
         f"Market Resistance: {scores.get('market_resistance', 0)}\n"
         f"Run Suppression: {scores['run_suppression']}/100\n"
         f"False Dominance: {scores['false_dominance']}/100\n"
@@ -2625,16 +2675,6 @@ def main():
                     }
 
                 state_game = state["games"][game_pk]
-
-                # Runtime-safe defaults for all V2.2.2 predictive locals.
-                # These prevent UnboundLocalError if a branch, missing odds match,
-                # or API edge case skips part of the calculation stack.
-                pressure_to_runs = 0
-                pre_run_over = 0
-                over_value = 0
-                predictive_move = 0
-                run_conversion = 0
-                run_prevention = 0
 
                 if start_time and not should_fetch_feed(start_time):
                     home = g.get("teams", {}).get("home", {}).get("team", {}).get("name", "Home")
@@ -2824,7 +2864,6 @@ def main():
                     "run_suppression": suppression,
                     "false_dominance": false_dom,
                 }
-                scores = apply_predictive_defaults(scores)
 
                 if info["status"] == "Live":
                     any_live = True
