@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V2.2.1
+SHIFT MLB V2.2.2 RUNTIME SAFE
 
 Professional live MLB totals monitor.
 V2.2.1 adds:
@@ -1770,6 +1770,42 @@ def over_value_score(opening, live, edge, scores):
     return round(clamp(score))
 
 
+
+def apply_predictive_defaults(scores):
+    """
+    Runtime safety helper.
+    Guarantees the new V2.2.1/V2.2.2 predictive keys exist before any alert,
+    log, or opportunity function can read them.
+    """
+    defaults = {
+        "pressure_to_runs": 0,
+        "pre_run_over_watch": 0,
+        "over_value": 0,
+        "predictive_market_move": 0,
+        "run_conversion": 0,
+        "run_prevention": 0,
+        "fake_pressure": 0,
+        "under_environment": 0,
+        "market_resistance": 0,
+        "current_inning_pressure": 0,
+        "remaining_opportunity": 0,
+        "pitcher_stress": 0,
+        "dominance": 0,
+        "contact_quality": 0,
+        "contact_trend": 50,
+        "lineup_pressure": 0,
+        "bullpen_risk": 0,
+        "starter_exit_probability": 0,
+        "times_through_order": 0,
+        "blowout_kill": 0,
+        "run_suppression": 0,
+        "false_dominance": 0,
+    }
+    for key, value in defaults.items():
+        scores.setdefault(key, value)
+    return scores
+
+
 def confidence_score(side, edge, scenario, scores, evidence, market_resistance):
     """
     Converts the signal stack into a confidence grade used for WATCH/STRIKE.
@@ -1907,6 +1943,10 @@ def expected_future_runs(
     upward += (starter_exit / 100) * 0.45
     upward += (max(0, market_resistance) / 100) * 0.60
     upward += (run_conversion / 100) * 0.90
+    pressure_to_runs = safe_float(pressure_to_runs, 0)
+    pre_run_over_watch = safe_float(pre_run_over_watch, 0)
+    predictive_market_move = safe_float(predictive_market_move, 0)
+
     upward += (pressure_to_runs / 100) * 0.75
     upward += (pre_run_over_watch / 100) * 0.55
     upward += (max(0, predictive_market_move) / 100) * 0.45
@@ -2456,7 +2496,8 @@ def describe_reasons(info, p, q, traffic, hitters, scores, scenario):
 
 
 def format_alert(label, start_label, info, market_context, opportunity, p, q, traffic, hitters, flags):
-    scores = opportunity["scores"]
+    scores = apply_predictive_defaults(opportunity["scores"])
+    opportunity["scores"] = scores
     reasons = describe_reasons(info, p, q, traffic, hitters, scores, opportunity["scenario"])
     reason_text = "\n".join([f"• {r}" for r in reasons])
 
@@ -2476,7 +2517,7 @@ def format_alert(label, start_label, info, market_context, opportunity, p, q, tr
     )
 
     return (
-        f"SHIFT MLB V2.2.1 {action}\n\n"
+        f"SHIFT MLB V2.2.2 RUNTIME SAFE {action}\n\n"
         f"{label}\n"
         f"Start: {start_label}\n\n"
         f"Instruction:\n"
@@ -2585,6 +2626,16 @@ def main():
 
                 state_game = state["games"][game_pk]
 
+                # Runtime-safe defaults for all V2.2.2 predictive locals.
+                # These prevent UnboundLocalError if a branch, missing odds match,
+                # or API edge case skips part of the calculation stack.
+                pressure_to_runs = 0
+                pre_run_over = 0
+                over_value = 0
+                predictive_move = 0
+                run_conversion = 0
+                run_prevention = 0
+
                 if start_time and not should_fetch_feed(start_time):
                     home = g.get("teams", {}).get("home", {}).get("team", {}).get("name", "Home")
                     away = g.get("teams", {}).get("away", {}).get("team", {}).get("name", "Away")
@@ -2632,6 +2683,12 @@ def main():
                 run_prevention = run_prevention_score(info, p, q, traffic, dominance, contact, current_pressure, remaining_opp, fake_pressure, under_env, blowout)
 
                 # Temporary score dict for over predictive calculation.
+                # IMPORTANT: initialize these BEFORE using them in dictionaries.
+                pressure_to_runs = 0
+                pre_run_over = 0
+                over_value = 0
+                predictive_move = 0
+
                 base_scores_for_over = {
                     "current_inning_pressure": current_pressure,
                     "remaining_opportunity": remaining_opp,
@@ -2649,12 +2706,15 @@ def main():
                     "under_environment": under_env,
                     "run_conversion": run_conversion,
                     "run_prevention": run_prevention,
-                    "pressure_to_runs": pressure_to_runs,
-                    "pre_run_over_watch": pre_run_over,
+                    "pressure_to_runs": 0,
+                    "pre_run_over_watch": 0,
+                    "over_value": 0,
+                    "predictive_market_move": 0,
                 }
                 pressure_to_runs = pressure_to_runs_score(info, p, q, traffic, hitters, base_scores_for_over)
                 base_scores_for_over["pressure_to_runs"] = pressure_to_runs
                 pre_run_over = pre_run_over_watch_score(opening_total, live_total, info, p, q, traffic, base_scores_for_over)
+                base_scores_for_over["pre_run_over_watch"] = pre_run_over
 
                 # Temporary score dict for predictive market-move calculation.
                 pre_scores = {
@@ -2674,13 +2734,22 @@ def main():
                     "under_environment": under_env,
                     "run_conversion": run_conversion,
                     "run_prevention": run_prevention,
+                    "pressure_to_runs": pressure_to_runs,
+                    "pre_run_over_watch": pre_run_over,
+                    "over_value": over_value,
                 }
                 predictive_move = predictive_market_move_score(opening_total, live_total, info, p, q, traffic, pre_scores)
                 pre_scores["predictive_market_move"] = predictive_move
                 provisional_edge = 0
                 if live_total is not None:
-                    provisional_edge = projected_final_total(info, 0) - live_total
+                    # Use current score vs live total as a conservative placeholder before full projection.
+                    # Full edge is calculated later by detect_total_opportunity after expected future runs.
+                    provisional_edge = info.get("total_runs", 0) - live_total
                 over_value = over_value_score(opening_total, live_total, provisional_edge, pre_scores)
+                pre_scores["over_value"] = over_value
+                pre_scores["pre_run_over_watch"] = pre_run_over
+                pre_scores["pressure_to_runs"] = pressure_to_runs
+                pre_scores["predictive_market_move"] = predictive_move
 
                 expected_future = expected_future_runs(
                     info,
@@ -2755,6 +2824,7 @@ def main():
                     "run_suppression": suppression,
                     "false_dominance": false_dom,
                 }
+                scores = apply_predictive_defaults(scores)
 
                 if info["status"] == "Live":
                     any_live = True
