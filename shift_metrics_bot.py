@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V2.2.3 SMS SAFE
+SHIFT MLB V2.2.4 DECISION CALIBRATED
 
 Professional live MLB totals monitor.
 V2.2.1 adds:
@@ -88,6 +88,18 @@ LINE_IMPROVEMENT_TO_REPEAT = float(os.getenv("LINE_IMPROVEMENT_TO_REPEAT", "1.0"
 # Twilio rejects message bodies over 1600 characters.
 # Keep texts short; keep full details in Railway logs.
 MAX_SMS_CHARS = int(os.getenv("MAX_SMS_CHARS", "1350"))
+
+# V2.2.4 decision calibration:
+# Separates projected edge from live confirmation so WATCH/STRIKE is cleaner.
+MIN_OVER_CONFIRMATION_FOR_STRIKE = int(os.getenv("MIN_OVER_CONFIRMATION_FOR_STRIKE", "60"))
+MIN_LATE_OVER_CONFIRMATION_FOR_STRIKE = int(os.getenv("MIN_LATE_OVER_CONFIRMATION_FOR_STRIKE", "68"))
+MIN_UNDER_CONFIRMATION_FOR_STRIKE = int(os.getenv("MIN_UNDER_CONFIRMATION_FOR_STRIKE", "62"))
+MIN_LATE_UNDER_CONFIRMATION_FOR_STRIKE = int(os.getenv("MIN_LATE_UNDER_CONFIRMATION_FOR_STRIKE", "68"))
+MIN_UNDER_STRIKE_EDGE_RUNS = float(os.getenv("MIN_UNDER_STRIKE_EDGE_RUNS", "1.0"))
+MIN_LATE_OVER_STRIKE_EDGE_RUNS = float(os.getenv("MIN_LATE_OVER_STRIKE_EDGE_RUNS", "1.25"))
+MAX_PROJECTION_EDGE_INNING_7 = float(os.getenv("MAX_PROJECTION_EDGE_INNING_7", "4.5"))
+MAX_PROJECTION_EDGE_INNING_8 = float(os.getenv("MAX_PROJECTION_EDGE_INNING_8", "3.0"))
+MAX_PROJECTION_EDGE_INNING_9 = float(os.getenv("MAX_PROJECTION_EDGE_INNING_9", "2.0"))
 
 # Professional decision-layer gates
 MIN_STRIKE_CONFIDENCE = int(os.getenv("MIN_STRIKE_CONFIDENCE", "64"))
@@ -264,6 +276,10 @@ def compact_sms_message(msg, max_chars=MAX_SMS_CHARS):
         "Score:",
         "Inning:",
         "Base/Out:",
+        "Projection Score:",
+        "Confirmation Score:",
+        "Need Runs:",
+        "Action Window:",
         "Confidence:",
         "CIP:",
         "RO:",
@@ -1657,7 +1673,7 @@ def best_entry_guidance(side, live, opening, edge, action, scores):
         strong_line = live - BEST_ENTRY_HALF_RUN_BUFFER
         if move >= MARKET_HAS_ALREADY_MOVED_RUNS and action == "WATCH":
             return f"Best entry: {strong_line:.1f} or lower. Current {live} has already moved +{move:.1f}; avoid chasing unless pressure continues."
-        if scores.get("run_conversion", 0) >= 70:
+        if scores.get("confirmation_score", 0) >= 68 or scores.get("run_conversion", 0) >= 70:
             return f"Best entry: {live} playable; {strong_line:.1f} or lower is stronger."
         return f"Best entry: wait for {strong_line:.1f} or renewed pressure confirmation."
 
@@ -1665,7 +1681,7 @@ def best_entry_guidance(side, live, opening, edge, action, scores):
         strong_line = live + BEST_ENTRY_HALF_RUN_BUFFER
         if move <= -MARKET_HAS_ALREADY_MOVED_RUNS and action == "WATCH":
             return f"Best entry: {strong_line:.1f} or higher. Current {live} has already moved down {move:.1f}; avoid chasing unless run prevention stays strong."
-        if scores.get("run_prevention", 0) >= 72:
+        if scores.get("confirmation_score", 0) >= 68 or scores.get("run_prevention", 0) >= 75:
             return f"Best entry: {live} playable; {strong_line:.1f} or higher is stronger."
         return f"Best entry: wait for {strong_line:.1f} or cleaner run-prevention confirmation."
 
@@ -1861,6 +1877,172 @@ def over_value_score(opening, live, edge, scores):
     return round(clamp(score))
 
 
+def projection_score(side, edge, scores):
+    """
+    How strongly the model thinks the current market line is wrong.
+    This is separate from whether the live game confirms a bet right now.
+    """
+    ae = abs(edge)
+    score = 0
+
+    if ae >= 3.0:
+        score += 55
+    elif ae >= 2.0:
+        score += 42
+    elif ae >= 1.5:
+        score += 32
+    elif ae >= 1.0:
+        score += 22
+    elif ae >= 0.7:
+        score += 12
+
+    if side == "OVER":
+        score += scores.get("over_value", 0) * 0.18
+        score += max(0, scores.get("predictive_market_move", 0)) * 0.18
+        score += scores.get("pre_run_over_watch", 0) * 0.12
+    else:
+        score += scores.get("run_prevention", 0) * 0.20
+        score += max(0, -scores.get("predictive_market_move", 0)) * 0.15
+        score += scores.get("under_environment", 0) * 0.15
+
+    return round(clamp(score))
+
+
+def confirmation_score(side, info, scores):
+    """
+    How much the live game state confirms action right now.
+    This prevents misleading 100/100 confidence on low-confirmation WATCH spots.
+    """
+    inning = safe_int(info.get("inning", 1), 1)
+
+    if side == "OVER":
+        score = (
+            scores.get("current_inning_pressure", 0) * 0.25
+            + scores.get("pressure_to_runs", 0) * 0.25
+            + scores.get("run_conversion", 0) * 0.20
+            + scores.get("contact_quality", 0) * 0.15
+            + scores.get("pitcher_stress", 0) * 0.10
+            + scores.get("lineup_pressure", 0) * 0.05
+        )
+
+        # Late overs need stronger current or near-current evidence.
+        if inning >= 8 and scores.get("current_inning_pressure", 0) < 45:
+            score -= 12
+        elif inning >= 7 and scores.get("current_inning_pressure", 0) < 35:
+            score -= 7
+
+        if scores.get("pre_run_over_watch", 0) >= 85 and scores.get("pressure_to_runs", 0) >= 70:
+            score += 8
+
+        if scores.get("run_prevention", 0) >= 65:
+            score -= 12
+
+    else:
+        score = (
+            scores.get("run_prevention", 0) * 0.35
+            + scores.get("under_environment", 0) * 0.25
+            + max(0, 100 - scores.get("current_inning_pressure", 0)) * 0.15
+            + max(0, 100 - scores.get("contact_quality", 0)) * 0.10
+            + max(0, 100 - scores.get("pressure_to_runs", 0)) * 0.10
+            + max(0, -scores.get("predictive_market_move", 0)) * 0.05
+        )
+
+        if inning >= 7:
+            score += 6
+        if scores.get("current_inning_pressure", 0) > 45:
+            score -= 12
+        if scores.get("contact_quality", 0) > 55:
+            score -= 12
+
+    return round(clamp(score))
+
+
+def inning_adjusted_projection(info, live_total, projected_total):
+    """
+    Caps unrealistic late-game projections so one hot model signal does not produce
+    impossible-looking final totals such as +8 to +10 runs after the 7th.
+    """
+    if live_total is None or projected_total is None:
+        return projected_total
+
+    inning = safe_int(info.get("inning", 1), 1)
+    cap = None
+
+    if inning >= 9:
+        cap = MAX_PROJECTION_EDGE_INNING_9
+    elif inning >= 8:
+        cap = MAX_PROJECTION_EDGE_INNING_8
+    elif inning >= 7:
+        cap = MAX_PROJECTION_EDGE_INNING_7
+
+    if cap is None:
+        return projected_total
+
+    if projected_total > live_total + cap:
+        return round(live_total + cap, 1)
+    if projected_total < live_total - cap:
+        return round(live_total - cap, 1)
+
+    return projected_total
+
+
+def need_runs_context(info, live_total, side):
+    """
+    Simple late-game context for the text:
+    how many runs matter relative to the current live total.
+    """
+    if live_total is None:
+        return "Need Runs: live total unavailable"
+
+    current_runs = safe_float(info.get("total_runs", 0), 0)
+    innings_left = innings_remaining_estimate(info)
+
+    if side == "OVER":
+        need = max(0, math.floor(live_total - current_runs) + 1)
+        return f"Need Runs: {need} more to clear OVER {live_total} | InnLeft: {innings_left:.1f}"
+    else:
+        cushion = max(0, math.ceil(live_total - current_runs) - 1)
+        return f"Need Runs: UNDER {live_total} has {cushion} run cushion | InnLeft: {innings_left:.1f}"
+
+
+def action_window(side, line, edge, scores, info):
+    """
+    Practical action guidance.
+    """
+    inning = safe_int(info.get("inning", 1), 1)
+    if line is None:
+        return "Action Window: no live line"
+
+    if side == "OVER":
+        preferred = line - 0.5
+        pass_line = line + (1.0 if inning < 7 else 0.5)
+        if scores.get("confirmation_score", 0) >= 70:
+            return f"Action Window: play {line}; prefer {preferred:.1f}; pass if {pass_line:.1f}+"
+        return f"Action Window: wait for {preferred:.1f} or confirmation; pass if {pass_line:.1f}+"
+
+    preferred = line + 0.5
+    pass_line = line - (1.0 if inning < 7 else 0.5)
+    if scores.get("confirmation_score", 0) >= 70:
+        return f"Action Window: play {line}; prefer {preferred:.1f}; pass if {pass_line:.1f}-"
+    return f"Action Window: wait for {preferred:.1f} or confirmation; pass if {pass_line:.1f}-"
+
+
+def clean_scenario_label(scenario):
+    """
+    Scenario describes environment only. Action decides WATCH/STRIKE.
+    Removes contradictions like 'BET NOW' with 'WATCH ONLY' scenario.
+    """
+    if not scenario:
+        return "Market Evaluation"
+
+    cleaned = scenario
+    for bad in [" → WATCH ONLY", " → Watch", " Watch", " WATCH ONLY"]:
+        cleaned = cleaned.replace(bad, "")
+    cleaned = cleaned.replace("Predictive Market Move → Over", "Predictive Over Build")
+    cleaned = cleaned.replace("Predictive Market Move → Under", "Predictive Under Build")
+    return cleaned.strip()
+
+
 def confidence_score(side, edge, scenario, scores, evidence, market_resistance):
     """
     Converts the signal stack into a confidence grade used for WATCH/STRIKE.
@@ -1917,29 +2099,60 @@ def confidence_score(side, edge, scenario, scores, evidence, market_resistance):
 
 def action_from_confidence(side, confidence, edge, scores=None):
     """
-    Keeps the bot from turning every signal into a bet.
-    V2.2 requires run conversion for OVER strikes and run prevention for UNDER strikes.
+    V2.2.4 calibrated action engine.
+    Projection finds the opportunity; confirmation decides whether it is actionable now.
     """
     scores = scores or {}
-    min_edge = MIN_OVER_EDGE_RUNS if side == "OVER" else MIN_UNDER_EDGE_RUNS
+    inning = safe_int(scores.get("inning", 1), 1)
+    projection = scores.get("projection_score", confidence)
+    confirmation = scores.get("confirmation_score", confidence)
 
-    strike_ready = confidence >= MIN_STRIKE_CONFIDENCE and abs(edge) >= min_edge
+    if side == "OVER":
+        min_edge = MIN_LATE_OVER_STRIKE_EDGE_RUNS if inning >= 7 else MIN_OVER_EDGE_RUNS
+        min_confirm = MIN_LATE_OVER_CONFIRMATION_FOR_STRIKE if inning >= 7 else MIN_OVER_CONFIRMATION_FOR_STRIKE
 
-    if side == "OVER" and strike_ready:
-        if scores.get("run_conversion", 0) >= MIN_OVER_RUN_CONVERSION_FOR_STRIKE:
+        strike_ready = (
+            edge >= min_edge
+            and projection >= 65
+            and confirmation >= min_confirm
+            and scores.get("pressure_to_runs", 0) >= (70 if inning >= 7 else 60)
+            and scores.get("run_conversion", 0) >= (62 if inning >= 7 else 55)
+        )
+        if strike_ready:
             return "STRIKE"
-        # Strong predictive move can still be WATCH, not STRIKE.
-        return "WATCH" if confidence >= MIN_WATCH_CONFIDENCE else "NO_PLAY"
 
-    if side == "UNDER" and strike_ready:
-        if scores.get("run_prevention", 0) >= MIN_UNDER_RUN_PREVENTION_FOR_STRIKE:
-            return "STRIKE"
-        return "WATCH" if confidence >= MIN_WATCH_CONFIDENCE else "NO_PLAY"
+        watch_ready = (
+            edge >= MIN_WATCH_EDGE_RUNS
+            and projection >= 55
+            and (
+                confirmation >= 40
+                or scores.get("pre_run_over_watch", 0) >= PRE_RUN_OVER_WATCH_SCORE
+                or scores.get("predictive_market_move", 0) >= MIN_PREDICTIVE_MARKET_MOVE_FOR_WATCH
+            )
+        )
+        return "WATCH" if watch_ready else "NO_PLAY"
 
-    if abs(edge) >= MIN_WATCH_EDGE_RUNS and confidence >= MIN_WATCH_CONFIDENCE:
-        return "WATCH"
+    # UNDER
+    min_edge = MIN_UNDER_STRIKE_EDGE_RUNS
+    min_confirm = MIN_LATE_UNDER_CONFIRMATION_FOR_STRIKE if inning >= 7 else MIN_UNDER_CONFIRMATION_FOR_STRIKE
 
-    return "NO_PLAY"
+    strike_ready = (
+        edge <= -min_edge
+        and projection >= 62
+        and confirmation >= min_confirm
+        and scores.get("run_prevention", 0) >= 75
+        and scores.get("current_inning_pressure", 0) <= 30
+        and scores.get("contact_quality", 0) <= 40
+    )
+    if strike_ready:
+        return "STRIKE"
+
+    watch_ready = (
+        edge <= -MIN_WATCH_EDGE_RUNS
+        and projection >= 50
+        and confirmation >= 50
+    )
+    return "WATCH" if watch_ready else "NO_PLAY"
 
 
 def market_pressure(opening, live):
@@ -2280,7 +2493,7 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
                     "price": over_price,
                     "edge": edge,
                     "edge_grade": edge_grade(edge),
-                    "scenario": scenario,
+                    "scenario": clean_scenario_label(scenario),
                     "scores": scores,
                     "projected_total": projected_total,
                     "evidence": evidence,
@@ -2301,7 +2514,7 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
                     "price": under_price,
                     "edge": edge,
                     "edge_grade": edge_grade(edge),
-                    "scenario": scenario,
+                    "scenario": clean_scenario_label(scenario),
                     "scores": scores,
                     "projected_total": projected_total,
                     "evidence": evidence,
@@ -2316,7 +2529,11 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
             evidence = live_evidence_report(info, p, q, traffic, scores, "Predictive Market Move → Over Watch", side="OVER")
             if evidence["ok"]:
                 watch_edge = max(edge, MIN_WATCH_EDGE_RUNS)
+                scores["inning"] = safe_int(info.get("inning", 1), 1)
+                scores["projection_score"] = projection_score("OVER", watch_edge, scores)
+                scores["confirmation_score"] = confirmation_score("OVER", info, scores)
                 confidence = confidence_score("OVER", watch_edge, "Predictive Market Move → Over Watch", scores, evidence, scores.get("market_resistance", 0))
+                confidence = min(confidence, max(scores["projection_score"], scores["confirmation_score"]))
                 if confidence >= MIN_WATCH_CONFIDENCE:
                     candidates.append({
                         "market_type": "Full Game Total",
@@ -2325,7 +2542,7 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
                         "price": over_price,
                         "edge": round(watch_edge, 1),
                         "edge_grade": "Watch",
-                        "scenario": "Predictive Market Move → Over Watch",
+                        "scenario": clean_scenario_label("Predictive Market Move → Over Watch"),
                         "scores": scores,
                         "projected_total": projected_total,
                         "evidence": evidence,
@@ -2336,7 +2553,11 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
             evidence = live_evidence_report(info, p, q, traffic, scores, "Predictive Market Move → Under Watch", side="UNDER")
             if evidence["ok"]:
                 watch_edge = min(edge, -MIN_WATCH_EDGE_RUNS)
+                scores["inning"] = safe_int(info.get("inning", 1), 1)
+                scores["projection_score"] = projection_score("UNDER", watch_edge, scores)
+                scores["confirmation_score"] = confirmation_score("UNDER", info, scores)
                 confidence = confidence_score("UNDER", watch_edge, "Predictive Market Move → Under Watch", scores, evidence, scores.get("market_resistance", 0))
+                confidence = min(confidence, max(scores["projection_score"], scores["confirmation_score"]))
                 if confidence >= MIN_WATCH_CONFIDENCE:
                     candidates.append({
                         "market_type": "Full Game Total",
@@ -2345,7 +2566,7 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
                         "price": under_price,
                         "edge": round(watch_edge, 1),
                         "edge_grade": "Watch",
-                        "scenario": "Predictive Market Move → Under Watch",
+                        "scenario": clean_scenario_label("Predictive Market Move → Under Watch"),
                         "scores": scores,
                         "projected_total": projected_total,
                         "evidence": evidence,
@@ -2359,7 +2580,11 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
         evidence = live_evidence_report(info, p, q, traffic, scores, "Pre-Run Pressure Build → Over Watch", side="OVER")
         if evidence["ok"]:
             watch_edge = max(edge, MIN_WATCH_EDGE_RUNS)
+            scores["inning"] = safe_int(info.get("inning", 1), 1)
+            scores["projection_score"] = projection_score("OVER", watch_edge, scores)
+            scores["confirmation_score"] = confirmation_score("OVER", info, scores)
             confidence = confidence_score("OVER", watch_edge, "Pre-Run Pressure Build → Over Watch", scores, evidence, scores.get("market_resistance", 0))
+            confidence = min(confidence, max(scores["projection_score"], scores["confirmation_score"]))
             if confidence >= MIN_WATCH_CONFIDENCE and scores.get("pressure_to_runs", 0) >= MIN_OVER_RUN_CONVERSION_FOR_WATCH:
                 candidates.append({
                     "market_type": "Full Game Total",
@@ -2368,7 +2593,7 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
                     "price": over_price,
                     "edge": round(watch_edge, 1),
                     "edge_grade": "Watch",
-                    "scenario": "Pre-Run Pressure Build → Over Watch",
+                    "scenario": clean_scenario_label("Pre-Run Pressure Build → Over Watch"),
                     "scores": scores,
                     "projected_total": projected_total,
                     "evidence": evidence,
@@ -2443,7 +2668,7 @@ def should_alert(state_game, opportunity):
     alerts.append({
         "ts": now_ts,
         "key": key,
-        "scenario": scenario,
+        "scenario": clean_scenario_label(scenario),
         "edge_abs": edge,
         "line": line,
         "price": price,
@@ -2567,7 +2792,7 @@ def format_alert(label, start_label, info, market_context, opportunity, p, q, tr
     )
 
     return (
-        f"SHIFT MLB V2.2.3 SMS SAFE {action}\n\n"
+        f"SHIFT MLB V2.2.4 DECISION CALIBRATED {action}\n\n"
         f"{label}\n"
         f"Start: {start_label}\n\n"
         f"Instruction:\n"
