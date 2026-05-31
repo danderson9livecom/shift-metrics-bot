@@ -2,6 +2,7 @@ import os
 import time
 import json
 import math
+import csv
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -9,7 +10,7 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V2.2.5 STRIKE SMS ONLY
+SHIFT MLB V2.3.0 SHARP TRACKER
 
 Professional live MLB totals monitor.
 V2.2.1 adds:
@@ -52,6 +53,9 @@ load_dotenv()
 
 TZ = ZoneInfo("America/Phoenix")
 STATE_FILE = os.getenv("STATE_FILE", "shift_v2_state.json")
+
+STRIKE_HISTORY_FILE = os.getenv("STRIKE_HISTORY_FILE", "strike_history.csv")
+CLV_HISTORY_FILE = os.getenv("CLV_HISTORY_FILE", "clv_history.csv")
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
@@ -98,6 +102,27 @@ MAX_SHORT_SMS_CHARS = int(os.getenv("MAX_SHORT_SMS_CHARS", "650"))
 ELITE_STRIKE_PROJECTION = int(os.getenv("ELITE_STRIKE_PROJECTION", "85"))
 ELITE_STRIKE_CONFIRMATION = int(os.getenv("ELITE_STRIKE_CONFIRMATION", "80"))
 ELITE_STRIKE_EDGE = float(os.getenv("ELITE_STRIKE_EDGE", "2.0"))
+
+# V2.3.0 professional calibration:
+# Improve accuracy without handcuffing the model or increasing API credit usage.
+ENABLE_TIME_REMAINING_ADJUSTMENT = os.getenv("ENABLE_TIME_REMAINING_ADJUSTMENT", "true").lower() == "true"
+ENABLE_DUPLICATE_STRIKE_LOCK = os.getenv("ENABLE_DUPLICATE_STRIKE_LOCK", "true").lower() == "true"
+ENABLE_STRIKE_HISTORY = os.getenv("ENABLE_STRIKE_HISTORY", "true").lower() == "true"
+ENABLE_CLV_TRACKING = os.getenv("ENABLE_CLV_TRACKING", "true").lower() == "true"
+
+# Re-alert only when the same game/side materially improves.
+RE_ALERT_MIN_EDGE_IMPROVEMENT = float(os.getenv("RE_ALERT_MIN_EDGE_IMPROVEMENT", "2.0"))
+RE_ALERT_MIN_PROJECTION_IMPROVEMENT = float(os.getenv("RE_ALERT_MIN_PROJECTION_IMPROVEMENT", "2.5"))
+RE_ALERT_MIN_CONFIRMATION_IMPROVEMENT = int(os.getenv("RE_ALERT_MIN_CONFIRMATION_IMPROVEMENT", "15"))
+
+# Time remaining adjustment is intentionally moderate so we do not kill good winners.
+TIME_ADJ_INNING_1_4 = float(os.getenv("TIME_ADJ_INNING_1_4", "1.00"))
+TIME_ADJ_INNING_5_6 = float(os.getenv("TIME_ADJ_INNING_5_6", "0.90"))
+TIME_ADJ_INNING_7_8 = float(os.getenv("TIME_ADJ_INNING_7_8", "0.78"))
+TIME_ADJ_INNING_9_PLUS = float(os.getenv("TIME_ADJ_INNING_9_PLUS", "0.55"))
+
+# Credit usage:
+# These features do not add extra API calls. They only use data already fetched during normal polling.
 
 # V2.2.4 decision calibration:
 # Separates projected edge from live confirmation so WATCH/STRIKE is cleaner.
@@ -238,6 +263,207 @@ def market_label(price):
     if -140 <= p < -115 or 100 < p <= 110:
         return "Acceptable price"
     return "Bad price"
+
+
+def csv_append_once(path, fieldnames, row):
+    """
+    Lightweight local CSV logging. No extra API calls / no extra credits.
+    """
+    exists = os.path.exists(path)
+    try:
+        with open(path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not exists:
+                writer.writeheader()
+            writer.writerow(row)
+    except Exception as e:
+        print(f"CSV LOG ERROR {path}:", repr(e))
+
+
+def time_remaining_multiplier(info):
+    """
+    Moderate time-remaining adjustment.
+    It reduces late-game projection aggression without handcuffing early/mid-game winners.
+    """
+    if not ENABLE_TIME_REMAINING_ADJUSTMENT:
+        return 1.0
+
+    inning = safe_int(info.get("inning", 1), 1)
+
+    if inning <= 4:
+        return TIME_ADJ_INNING_1_4
+    if inning <= 6:
+        return TIME_ADJ_INNING_5_6
+    if inning <= 8:
+        return TIME_ADJ_INNING_7_8
+    return TIME_ADJ_INNING_9_PLUS
+
+
+def adjusted_projection_for_time(info, live_total, projected_total):
+    """
+    Adjusts only the EDGE between live and projected line, not total runs directly.
+    This preserves early signals while avoiding wild late projections.
+    """
+    if live_total is None or projected_total is None:
+        return projected_total
+
+    mult = time_remaining_multiplier(info)
+    edge = projected_total - live_total
+    adjusted = live_total + (edge * mult)
+    return round(adjusted, 1)
+
+
+def strike_key(info, side):
+    return f"{today()}::{info.get('away','')}@{info.get('home','')}::{side}"
+
+
+def should_allow_strike(state, info, opportunity):
+    """
+    Duplicate strike lock:
+    - First STRIKE for game/side is allowed.
+    - Re-alert only if line/projection/confirmation materially improves.
+    This reduces repeat SMS and avoids chasing the same thesis repeatedly.
+    """
+    if not ENABLE_DUPLICATE_STRIKE_LOCK:
+        return True, "duplicate lock disabled"
+
+    if opportunity.get("action") != "STRIKE":
+        return True, "not a strike"
+
+    games = state.setdefault("games", {})
+    key = strike_key(info, opportunity.get("side"))
+    prior = games.get(key, {}).get("strike_lock")
+
+    if not prior:
+        return True, "first strike"
+
+    old_edge = safe_float(prior.get("edge"), 0)
+    old_proj = safe_float(prior.get("projection"), 0)
+    old_confirm = safe_int(prior.get("confirmation_score"), 0)
+
+    new_edge = safe_float(opportunity.get("edge"), 0)
+    new_proj = safe_float(opportunity.get("projection"), safe_float(opportunity.get("projected_total"), 0))
+    new_confirm = safe_int(opportunity.get("scores", {}).get("confirmation_score"), 0)
+
+    edge_improved = abs(new_edge) >= abs(old_edge) + RE_ALERT_MIN_EDGE_IMPROVEMENT
+    projection_improved = abs(new_proj - old_proj) >= RE_ALERT_MIN_PROJECTION_IMPROVEMENT
+    confirmation_improved = new_confirm >= old_confirm + RE_ALERT_MIN_CONFIRMATION_IMPROVEMENT
+
+    if edge_improved or projection_improved or confirmation_improved:
+        return True, "material improvement"
+
+    return False, "duplicate strike suppressed"
+
+
+def record_strike_lock(state, info, opportunity):
+    if not ENABLE_DUPLICATE_STRIKE_LOCK or opportunity.get("action") != "STRIKE":
+        return
+
+    games = state.setdefault("games", {})
+    key = strike_key(info, opportunity.get("side"))
+    games.setdefault(key, {})
+    games[key]["strike_lock"] = {
+        "time": now_local().isoformat(),
+        "side": opportunity.get("side"),
+        "line": opportunity.get("line"),
+        "edge": opportunity.get("edge"),
+        "projection": opportunity.get("projection", opportunity.get("projected_total")),
+        "confirmation_score": opportunity.get("scores", {}).get("confirmation_score"),
+    }
+
+
+def log_strike_history(info, opportunity, market_context=None):
+    """
+    Logs each sent STRIKE for later analysis.
+    No API call. Just local CSV.
+    """
+    if not ENABLE_STRIKE_HISTORY or opportunity.get("action") != "STRIKE":
+        return
+
+    scores = opportunity.get("scores", {})
+    market_context = market_context or {}
+
+    fieldnames = [
+        "timestamp", "date", "game", "side", "line", "price",
+        "opening_total", "live_total", "projected_total", "edge", "edge_grade",
+        "inning", "inning_state", "outs", "score",
+        "projection_score", "confirmation_score",
+        "stress", "contact", "p2r", "conv", "prev", "pred_move",
+        "scenario", "action"
+    ]
+
+    row = {
+        "timestamp": now_local().isoformat(),
+        "date": today(),
+        "game": f"{info.get('away')} at {info.get('home')}",
+        "side": opportunity.get("side"),
+        "line": opportunity.get("line"),
+        "price": opportunity.get("price"),
+        "opening_total": market_context.get("opening_total"),
+        "live_total": market_context.get("live_total", opportunity.get("line")),
+        "projected_total": opportunity.get("projection", opportunity.get("projected_total")),
+        "edge": opportunity.get("edge"),
+        "edge_grade": opportunity.get("edge_grade"),
+        "inning": info.get("inning"),
+        "inning_state": info.get("inning_state"),
+        "outs": info.get("outs"),
+        "score": f"{info.get('away_runs')}-{info.get('home_runs')}",
+        "projection_score": scores.get("projection_score"),
+        "confirmation_score": scores.get("confirmation_score"),
+        "stress": scores.get("pitcher_stress"),
+        "contact": scores.get("contact_quality"),
+        "p2r": scores.get("pressure_to_runs"),
+        "conv": scores.get("run_conversion"),
+        "prev": scores.get("run_prevention"),
+        "pred_move": scores.get("predictive_market_move"),
+        "scenario": opportunity.get("scenario"),
+        "action": opportunity.get("action"),
+    }
+
+    csv_append_once(STRIKE_HISTORY_FILE, fieldnames, row)
+
+
+def log_clv_snapshot(info, opportunity, current_live_total):
+    """
+    CLV tracking snapshot.
+    This uses odds already fetched during normal polling. No extra credit usage.
+    """
+    if not ENABLE_CLV_TRACKING or opportunity.get("action") != "STRIKE":
+        return
+
+    side = opportunity.get("side")
+    alert_line = safe_float(opportunity.get("line"), None)
+    current_line = safe_float(current_live_total, None)
+
+    if alert_line is None or current_line is None:
+        return
+
+    if side == "OVER":
+        clv = round(current_line - alert_line, 1)
+        beat_market = clv > 0
+    else:
+        clv = round(alert_line - current_line, 1)
+        beat_market = clv > 0
+
+    fieldnames = [
+        "timestamp", "date", "game", "side", "alert_line", "current_line",
+        "clv", "beat_market", "inning", "score"
+    ]
+
+    row = {
+        "timestamp": now_local().isoformat(),
+        "date": today(),
+        "game": f"{info.get('away')} at {info.get('home')}",
+        "side": side,
+        "alert_line": alert_line,
+        "current_line": current_line,
+        "clv": clv,
+        "beat_market": beat_market,
+        "inning": info.get("inning"),
+        "score": f"{info.get('away_runs')}-{info.get('home_runs')}",
+    }
+
+    csv_append_once(CLV_HISTORY_FILE, fieldnames, row)
 
 
 def load_state():
@@ -544,7 +770,7 @@ def get_odds():
             print("ODDS API ERROR:", r.status_code, r.text)
             return []
         data = r.json()
-        print(f"ODDS EVENTS RETURNED: {len(data)} | Markets: {ODDS_MARKETS}")
+        print(f"ODDS EVENTS RETURNED: {len(data)} | Markets: {ODDS_MARKETS} | Credit-smart: no extra CLV/WATCH calls")
         return data
     except Exception as e:
         print("ODDS API EXCEPTION:", repr(e))
@@ -2635,6 +2861,7 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
     if live is None:
         return None
 
+    projected_total = adjusted_projection_for_time(info, live, projected_total)
     edge = round(projected_total - live, 1)
     bias = scenario_bias(scenario)
 
@@ -2656,6 +2883,7 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
                     "scenario": clean_scenario_label(scenario),
                     "scores": scores,
                     "projected_total": projected_total,
+            "projection": projected_total,
                     "evidence": evidence,
                     "confidence": confidence,
                     "action": action,
@@ -2677,6 +2905,7 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
                     "scenario": clean_scenario_label(scenario),
                     "scores": scores,
                     "projected_total": projected_total,
+            "projection": projected_total,
                     "evidence": evidence,
                     "confidence": confidence,
                     "action": action,
@@ -2705,6 +2934,7 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
                         "scenario": clean_scenario_label("Predictive Market Move → Over Watch"),
                         "scores": scores,
                         "projected_total": projected_total,
+            "projection": projected_total,
                         "evidence": evidence,
                         "confidence": confidence,
                         "action": "WATCH",
@@ -2729,6 +2959,7 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
                         "scenario": clean_scenario_label("Predictive Market Move → Under Watch"),
                         "scores": scores,
                         "projected_total": projected_total,
+            "projection": projected_total,
                         "evidence": evidence,
                         "confidence": confidence,
                         "action": "WATCH",
@@ -2756,6 +2987,7 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
                     "scenario": clean_scenario_label("Pre-Run Pressure Build → Over Watch"),
                     "scores": scores,
                     "projected_total": projected_total,
+            "projection": projected_total,
                     "evidence": evidence,
                     "confidence": confidence,
                     "action": "WATCH",
@@ -2952,7 +3184,7 @@ def format_alert(label, start_label, info, market_context, opportunity, p, q, tr
     )
 
     return (
-        f"SHIFT MLB V2.2.5 STRIKE SMS ONLY {action}\n\n"
+        f"SHIFT MLB V2.3.0 SHARP TRACKER {action}\n\n"
         f"{label}\n"
         f"Start: {start_label}\n\n"
         f"Instruction:\n"
