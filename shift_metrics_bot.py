@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V2.2.4 DECISION CALIBRATED
+SHIFT MLB V2.2.5 STRIKE SMS ONLY
 
 Professional live MLB totals monitor.
 V2.2.1 adds:
@@ -80,7 +80,7 @@ ALERT_COOLDOWN_SECONDS = int(os.getenv("ALERT_COOLDOWN_SECONDS", "720"))
 EDGE_IMPROVEMENT_TO_REPEAT = float(os.getenv("EDGE_IMPROVEMENT_TO_REPEAT", "0.7"))
 
 # Alert controls
-SEND_WATCH_ALERTS = os.getenv("SEND_WATCH_ALERTS", "true").lower() == "true"
+SEND_WATCH_ALERTS = os.getenv("SEND_WATCH_ALERTS", "false").lower() == "true"
 MAX_ALERTS_PER_GAME_SIDE = int(os.getenv("MAX_ALERTS_PER_GAME_SIDE", "2"))
 LINE_IMPROVEMENT_TO_REPEAT = float(os.getenv("LINE_IMPROVEMENT_TO_REPEAT", "1.0"))
 
@@ -88,6 +88,16 @@ LINE_IMPROVEMENT_TO_REPEAT = float(os.getenv("LINE_IMPROVEMENT_TO_REPEAT", "1.0"
 # Twilio rejects message bodies over 1600 characters.
 # Keep texts short; keep full details in Railway logs.
 MAX_SMS_CHARS = int(os.getenv("MAX_SMS_CHARS", "1350"))
+
+# V2.2.5 SMS behavior:
+# WATCH alerts remain in Railway logs only.
+# Only STRIKE / BET NOW alerts are sent by SMS.
+SEND_ONLY_STRIKE_SMS = os.getenv("SEND_ONLY_STRIKE_SMS", "true").lower() == "true"
+SHORT_STRIKE_SMS = os.getenv("SHORT_STRIKE_SMS", "true").lower() == "true"
+MAX_SHORT_SMS_CHARS = int(os.getenv("MAX_SHORT_SMS_CHARS", "650"))
+ELITE_STRIKE_PROJECTION = int(os.getenv("ELITE_STRIKE_PROJECTION", "85"))
+ELITE_STRIKE_CONFIRMATION = int(os.getenv("ELITE_STRIKE_CONFIRMATION", "80"))
+ELITE_STRIKE_EDGE = float(os.getenv("ELITE_STRIKE_EDGE", "2.0"))
 
 # V2.2.4 decision calibration:
 # Separates projected edge from live confirmation so WATCH/STRIKE is cleaner.
@@ -329,14 +339,164 @@ def compact_sms_message(msg, max_chars=MAX_SMS_CHARS):
 
 
 
+
+def alert_action_from_message(msg):
+    first_line = (msg.splitlines()[0] if msg else "").upper()
+    if "STRIKE" in first_line:
+        return "STRIKE"
+    if "WATCH" in first_line:
+        return "WATCH"
+    return "UNKNOWN"
+
+
+def extract_alert_value(msg, label):
+    """
+    Pulls simple values out of the full alert body for compact SMS.
+    """
+    for line in msg.splitlines():
+        line = line.strip()
+        if line.startswith(label):
+            return line.split(":", 1)[1].strip() if ":" in line else line.replace(label, "").strip()
+    return ""
+
+
+def first_nonempty_after_label(msg, label):
+    lines = [ln.rstrip() for ln in msg.splitlines()]
+    for i, ln in enumerate(lines):
+        if ln.strip().startswith(label):
+            for j in range(i + 1, min(i + 4, len(lines))):
+                if lines[j].strip():
+                    return lines[j].strip()
+    return ""
+
+
+def compact_strike_sms(msg):
+    """
+    Short betting text only. Full alert remains in Railway logs.
+    """
+    if not SHORT_STRIKE_SMS:
+        return compact_sms_message(msg, MAX_SHORT_SMS_CHARS)
+
+    lines = [ln.strip() for ln in msg.splitlines() if ln.strip()]
+    header = lines[0] if lines else "SHIFT MLB STRIKE"
+    matchup = lines[1] if len(lines) > 1 else ""
+
+    play = first_nonempty_after_label(msg, "PLAY:")
+    if not play:
+        side = extract_alert_value(msg, "Side")
+        line = extract_alert_value(msg, "Live Line")
+        play = f"{side} {line}".strip()
+
+    score = extract_alert_value(msg, "Score")
+    inning = extract_alert_value(msg, "Inning")
+    base_out = extract_alert_value(msg, "Base/Out")
+    proj = extract_alert_value(msg, "Proj")
+    edge = extract_alert_value(msg, "Edge")
+    projection = extract_alert_value(msg, "Projection Score")
+    confirmation = extract_alert_value(msg, "Confirmation Score")
+    need = extract_alert_value(msg, "Need Runs")
+    action_window = extract_alert_value(msg, "Action Window")
+
+    # Key metrics
+    stress = extract_alert_value(msg, "Stress")
+    contact = extract_alert_value(msg, "Contact")
+    p2r = extract_alert_value(msg, "P2R")
+    conv = extract_alert_value(msg, "Conv")
+    prev = extract_alert_value(msg, "Prev")
+    pred = extract_alert_value(msg, "PredMove")
+
+    # Elite label
+    try:
+        edge_num = float(edge.replace("+", "").replace("runs", "").strip().split()[0])
+    except Exception:
+        edge_num = 0.0
+    try:
+        proj_score = int(projection.split("/")[0])
+    except Exception:
+        proj_score = 0
+    try:
+        conf_score = int(confirmation.split("/")[0])
+    except Exception:
+        conf_score = 0
+
+    elite = (
+        abs(edge_num) >= ELITE_STRIKE_EDGE
+        and proj_score >= ELITE_STRIKE_PROJECTION
+        and conf_score >= ELITE_STRIKE_CONFIRMATION
+    )
+
+    title = "🔥 ELITE MLB STRIKE" if elite else "🚨 MLB STRIKE"
+
+    compact = [
+        title,
+        matchup,
+        "",
+        play,
+    ]
+
+    if proj or edge:
+        compact.append(f"Proj: {proj} | Edge: {edge}")
+    if projection or confirmation:
+        compact.append(f"ProjScore: {projection} | Confirm: {confirmation}")
+    if score or inning:
+        compact.append(f"Score: {score} | {inning}")
+    if base_out:
+        compact.append(f"Base/Out: {base_out}")
+    if need:
+        compact.append(need)
+    if action_window:
+        compact.append(action_window)
+
+    reason_bits = []
+    if stress:
+        reason_bits.append(f"Stress {stress}")
+    if contact:
+        reason_bits.append(f"Contact {contact}")
+    if p2r:
+        reason_bits.append(f"P2R {p2r}")
+    if conv:
+        reason_bits.append(f"Conv {conv}")
+    if prev:
+        reason_bits.append(f"Prev {prev}")
+    if pred:
+        reason_bits.append(f"Pred {pred}")
+
+    if reason_bits:
+        compact.extend(["", "Signals: " + " | ".join(reason_bits[:4])])
+
+    compact.append("")
+    compact.append("BET NOW")
+
+    text = "\n".join(compact)
+
+    if len(text) > MAX_SHORT_SMS_CHARS:
+        text = text[:MAX_SHORT_SMS_CHARS - 20].rstrip() + "\n[Trimmed]"
+
+    return text
+
+
+def should_send_sms(msg):
+    """
+    Watches are intentionally not sent by SMS.
+    They still appear in Railway logs.
+    """
+    if not SEND_ONLY_STRIKE_SMS:
+        return True
+    return alert_action_from_message(msg) == "STRIKE"
+
+
 def send_text(msg):
-    # Full alert stays in Railway logs.
+    # Full alert always stays in Railway logs.
     print("\n" + msg + "\n")
 
-    # SMS must stay under Twilio's limit.
-    sms_body = compact_sms_message(msg)
-    if len(sms_body) > MAX_SMS_CHARS:
-        sms_body = sms_body[:MAX_SMS_CHARS - 40].rstrip() + "\n[Trimmed]"
+    # WATCH alerts stay in logs only. STRIKE alerts go to SMS.
+    if not should_send_sms(msg):
+        print("TEXT NOT SENT: WATCH alert logged only.")
+        return
+
+    sms_body = compact_strike_sms(msg)
+    if len(sms_body) > MAX_SHORT_SMS_CHARS:
+        sms_body = sms_body[:MAX_SHORT_SMS_CHARS - 40].rstrip() + "\n[Trimmed]"
 
     print(f"SMS LENGTH: {len(sms_body)} chars")
 
@@ -2792,7 +2952,7 @@ def format_alert(label, start_label, info, market_context, opportunity, p, q, tr
     )
 
     return (
-        f"SHIFT MLB V2.2.4 DECISION CALIBRATED {action}\n\n"
+        f"SHIFT MLB V2.2.5 STRIKE SMS ONLY {action}\n\n"
         f"{label}\n"
         f"Start: {start_label}\n\n"
         f"Instruction:\n"
