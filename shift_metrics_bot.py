@@ -9,10 +9,15 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V2.1
+SHIFT MLB V2.2
 
 Professional live MLB totals monitor.
-V2.1 adds:
+V2.2 adds:
+    - Predictive Market Move Engine
+    - Run Conversion Score for OVER alerts
+    - Run Prevention Score for UNDER alerts
+    - Better Entry Guidance
+    - Stronger WATCH vs STRIKE separation
     - WATCH vs STRIKE separation
     - Real UNDER engine
     - Fake-pressure filter
@@ -79,6 +84,14 @@ LINE_IMPROVEMENT_TO_REPEAT = float(os.getenv("LINE_IMPROVEMENT_TO_REPEAT", "1.0"
 MIN_STRIKE_CONFIDENCE = int(os.getenv("MIN_STRIKE_CONFIDENCE", "64"))
 MIN_WATCH_CONFIDENCE = int(os.getenv("MIN_WATCH_CONFIDENCE", "55"))
 MAX_LATE_OVER_INNING = int(os.getenv("MAX_LATE_OVER_INNING", "8"))
+
+# V2.2 predictive layers
+MIN_OVER_RUN_CONVERSION_FOR_STRIKE = int(os.getenv("MIN_OVER_RUN_CONVERSION_FOR_STRIKE", "62"))
+MIN_UNDER_RUN_PREVENTION_FOR_STRIKE = int(os.getenv("MIN_UNDER_RUN_PREVENTION_FOR_STRIKE", "66"))
+MIN_PREDICTIVE_MARKET_MOVE_FOR_WATCH = int(os.getenv("MIN_PREDICTIVE_MARKET_MOVE_FOR_WATCH", "62"))
+MIN_PREDICTIVE_MARKET_MOVE_FOR_STRIKE = int(os.getenv("MIN_PREDICTIVE_MARKET_MOVE_FOR_STRIKE", "76"))
+MARKET_HAS_ALREADY_MOVED_RUNS = float(os.getenv("MARKET_HAS_ALREADY_MOVED_RUNS", "1.5"))
+BEST_ENTRY_HALF_RUN_BUFFER = float(os.getenv("BEST_ENTRY_HALF_RUN_BUFFER", "0.5"))
 
 # Live-evidence gates:
 # Prevents false pregame / first-pitch alerts when there is no real game data yet.
@@ -1316,6 +1329,245 @@ def under_environment_score(info, p, q, traffic, dominance, contact, current_pre
     return round(clamp(score))
 
 
+
+def run_conversion_score(info, p, q, traffic, hitters, current_pressure, remaining_opp, stress, contact, lineup, contact_trend, tto, starter_exit, fake_pressure):
+    """
+    OVER quality score: pressure must be likely to become actual runs.
+    This prevents the bot from betting every traffic situation.
+    """
+    score = 0
+    outs = info.get("outs", 0)
+    runners_on = info.get("runners_on", 0)
+    base_state = info.get("base_state", {})
+
+    # Base/out conversion value.
+    if base_state.get("third") and outs <= 1:
+        score += 26
+    elif base_state.get("second") and outs <= 1:
+        score += 20
+    elif runners_on >= 2 and outs <= 1:
+        score += 28
+    elif runners_on >= 2 and outs == 2:
+        score += 12
+    elif runners_on == 1 and outs <= 1:
+        score += 10
+
+    # Current pressure matters, but only when it can convert.
+    if current_pressure >= 70:
+        score += 18
+    elif current_pressure >= 60:
+        score += 12
+    elif current_pressure >= 50:
+        score += 6
+
+    # Contact quality: hard contact converts pressure.
+    if contact >= 65:
+        score += 18
+    elif contact >= 55:
+        score += 12
+    elif contact >= 45:
+        score += 6
+
+    if q.get("barrels", 0) >= 1:
+        score += 10
+    if q.get("hard_hit", 0) >= 3:
+        score += 8
+    if q.get("ev_trend", 0) >= 5:
+        score += 8
+
+    # Command/traffic.
+    if p.get("walks", 0) >= 2:
+        score += 8
+    if q.get("strike_pct", 100) <= 55 and q.get("total_pitches", 0) >= 18:
+        score += 9
+    if q.get("zone_pct", 100) <= 42 and q.get("total_pitches", 0) >= 18:
+        score += 6
+    if traffic.get("consecutive_baserunners", 0) >= 2:
+        score += 10
+    if traffic.get("recent_baserunners", 0) >= 4:
+        score += 8
+
+    # Future conversion: lineup, starter exit, third time through.
+    if lineup >= 75:
+        score += 10
+    elif lineup >= 65:
+        score += 6
+
+    if starter_exit >= 65:
+        score += 10
+    elif starter_exit >= 50:
+        score += 6
+
+    if tto >= 55:
+        score += 8
+
+    if remaining_opp >= 65:
+        score += 6
+
+    # Swing-and-miss and fake pressure reduce conversion odds.
+    if q.get("whiff_pct", 0) >= 34 and q.get("csw_pct", 0) >= 30:
+        score -= 16
+    elif q.get("whiff_pct", 0) >= 28 and q.get("csw_pct", 0) >= 29:
+        score -= 8
+
+    score -= fake_pressure * 0.22
+
+    # Two outs makes conversion harder unless there is elite contact/command collapse.
+    if outs == 2 and current_pressure < 70 and contact < 60:
+        score -= 10
+
+    return round(clamp(score))
+
+
+def run_prevention_score(info, p, q, traffic, dominance, contact, current_pressure, remaining_opp, fake_pressure, under_environment, blowout):
+    """
+    UNDER quality score: low scoring must be likely to continue.
+    """
+    score = 0
+
+    if dominance >= 75:
+        score += 24
+    elif dominance >= 65:
+        score += 18
+    elif dominance >= 55:
+        score += 10
+
+    if q.get("whiff_pct", 0) >= 32 and q.get("csw_pct", 0) >= 30:
+        score += 18
+    elif q.get("whiff_pct", 0) >= 26 and q.get("csw_pct", 0) >= 28:
+        score += 10
+
+    if contact <= 25 and q.get("balls_in_play", 0) >= 4:
+        score += 18
+    elif contact <= 35:
+        score += 10
+
+    if current_pressure <= 25:
+        score += 16
+    elif current_pressure <= 35:
+        score += 8
+
+    if traffic.get("recent_baserunners", 0) <= 1:
+        score += 10
+
+    if p.get("walks", 0) == 0 and q.get("strike_pct", 0) >= 64:
+        score += 8
+
+    if remaining_opp <= 35:
+        score += 10
+
+    score += fake_pressure * 0.20
+    score += under_environment * 0.25
+    score += blowout * 0.12
+
+    # Under danger penalties.
+    if current_pressure >= 60:
+        score -= 15
+    if contact >= 55:
+        score -= 15
+    if p.get("walks", 0) >= 2:
+        score -= 8
+    if q.get("barrels", 0) >= 1:
+        score -= 8
+
+    return round(clamp(score))
+
+
+def predictive_market_move_score(opening, live, info, p, q, traffic, scores):
+    """
+    Attempts to identify the market moving BEFORE runs score.
+    This is a WATCH-first engine unless the run conversion/prevention is already strong.
+    Positive score = likely upward total move.
+    Negative score = likely downward total move.
+    """
+    if live is None:
+        return 0
+
+    move = 0
+    if opening is not None:
+        move = live - opening
+
+    score = 0
+
+    # Leading OVER indicators before score changes.
+    if p.get("batters_faced", 0) >= 6:
+        pitches_per_batter = p.get("pitch_count", 0) / max(1, p.get("batters_faced", 1))
+        if pitches_per_batter >= 4.2:
+            score += 18
+        elif pitches_per_batter >= 3.8:
+            score += 10
+
+    if q.get("strike_pct", 100) <= 55 and q.get("total_pitches", 0) >= 18:
+        score += 14
+    if q.get("zone_pct", 100) <= 42 and q.get("total_pitches", 0) >= 18:
+        score += 10
+    if q.get("ev_trend", 0) >= 5:
+        score += 12
+    if q.get("hard_hit", 0) >= 2:
+        score += 10
+    if q.get("barrels", 0) >= 1:
+        score += 12
+    if traffic.get("recent_baserunners", 0) >= 3:
+        score += 14
+    if traffic.get("consecutive_baserunners", 0) >= 2:
+        score += 12
+    if scores.get("times_through_order", 0) >= 45:
+        score += 8
+    if scores.get("starter_exit_probability", 0) >= 55:
+        score += 10
+    if scores.get("lineup_pressure", 0) >= 70:
+        score += 8
+
+    # If the market has already moved upward, reduce predictive score.
+    if move >= 1.0:
+        score -= int(move * 18)
+
+    # Leading UNDER indicators.
+    under_pull = 0
+    if scores.get("run_prevention", 0) >= 70:
+        under_pull += 18
+    if scores.get("under_environment", 0) >= 60:
+        under_pull += 14
+    if scores.get("fake_pressure", 0) >= 55:
+        under_pull += 12
+    if scores.get("current_inning_pressure", 0) <= 25 and scores.get("contact_quality", 0) <= 35:
+        under_pull += 10
+
+    if under_pull > score:
+        return -round(clamp(under_pull))
+
+    return round(clamp(score))
+
+
+def best_entry_guidance(side, live, opening, edge, action, scores):
+    """
+    Gives practical entry guidance so the alert does not mean 'bet at any price.'
+    """
+    if live is None:
+        return "No live line available."
+
+    move = 0
+    if opening is not None:
+        move = live - opening
+
+    if side == "OVER":
+        strong_line = live - BEST_ENTRY_HALF_RUN_BUFFER
+        if move >= MARKET_HAS_ALREADY_MOVED_RUNS and action == "WATCH":
+            return f"Best entry: {strong_line:.1f} or lower. Current {live} has already moved +{move:.1f}; avoid chasing unless pressure continues."
+        if scores.get("run_conversion", 0) >= 70:
+            return f"Best entry: {live} playable; {strong_line:.1f} or lower is stronger."
+        return f"Best entry: wait for {strong_line:.1f} or renewed pressure confirmation."
+
+    if side == "UNDER":
+        strong_line = live + BEST_ENTRY_HALF_RUN_BUFFER
+        if move <= -MARKET_HAS_ALREADY_MOVED_RUNS and action == "WATCH":
+            return f"Best entry: {strong_line:.1f} or higher. Current {live} has already moved down {move:.1f}; avoid chasing unless run prevention stays strong."
+        if scores.get("run_prevention", 0) >= 72:
+            return f"Best entry: {live} playable; {strong_line:.1f} or higher is stronger."
+        return f"Best entry: wait for {strong_line:.1f} or cleaner run-prevention confirmation."
+
+    return "No entry guidance."
+
 def confidence_score(side, edge, scenario, scores, evidence, market_resistance):
     """
     Converts the signal stack into a confidence grade used for WATCH/STRIKE.
@@ -1340,16 +1592,22 @@ def confidence_score(side, edge, scenario, scores, evidence, market_resistance):
         confidence += scores.get("lineup_pressure", 0) * 0.06
         confidence += scores.get("starter_exit_probability", 0) * 0.06
         confidence += scores.get("contact_trend", 50) * 0.04
+        confidence += scores.get("run_conversion", 0) * 0.14
+        confidence += max(0, scores.get("predictive_market_move", 0)) * 0.10
         confidence += max(0, market_resistance) * 0.12
         confidence -= scores.get("fake_pressure", 0) * 0.16
+        confidence -= scores.get("run_prevention", 0) * 0.06
         confidence -= scores.get("under_environment", 0) * 0.10
         confidence -= scores.get("blowout_kill", 0) * 0.12
     else:
         confidence += scores.get("dominance", 0) * 0.09
         confidence += scores.get("under_environment", 0) * 0.12
+        confidence += scores.get("run_prevention", 0) * 0.14
         confidence += scores.get("fake_pressure", 0) * 0.10
         confidence += max(0, -market_resistance) * 0.12
+        confidence += max(0, -scores.get("predictive_market_move", 0)) * 0.08
         confidence -= scores.get("current_inning_pressure", 0) * 0.08
+        confidence -= scores.get("run_conversion", 0) * 0.06
         confidence -= scores.get("contact_quality", 0) * 0.08
         confidence -= scores.get("pitcher_stress", 0) * 0.06
 
@@ -1361,14 +1619,26 @@ def confidence_score(side, edge, scenario, scores, evidence, market_resistance):
     return round(clamp(confidence))
 
 
-def action_from_confidence(side, confidence, edge):
+def action_from_confidence(side, confidence, edge, scores=None):
     """
     Keeps the bot from turning every signal into a bet.
+    V2.2 requires run conversion for OVER strikes and run prevention for UNDER strikes.
     """
+    scores = scores or {}
     min_edge = MIN_OVER_EDGE_RUNS if side == "OVER" else MIN_UNDER_EDGE_RUNS
 
-    if abs(edge) >= min_edge and confidence >= MIN_STRIKE_CONFIDENCE:
-        return "STRIKE"
+    strike_ready = confidence >= MIN_STRIKE_CONFIDENCE and abs(edge) >= min_edge
+
+    if side == "OVER" and strike_ready:
+        if scores.get("run_conversion", 0) >= MIN_OVER_RUN_CONVERSION_FOR_STRIKE:
+            return "STRIKE"
+        # Strong predictive move can still be WATCH, not STRIKE.
+        return "WATCH" if confidence >= MIN_WATCH_CONFIDENCE else "NO_PLAY"
+
+    if side == "UNDER" and strike_ready:
+        if scores.get("run_prevention", 0) >= MIN_UNDER_RUN_PREVENTION_FOR_STRIKE:
+            return "STRIKE"
+        return "WATCH" if confidence >= MIN_WATCH_CONFIDENCE else "NO_PLAY"
 
     if abs(edge) >= MIN_WATCH_EDGE_RUNS and confidence >= MIN_WATCH_CONFIDENCE:
         return "WATCH"
@@ -1407,6 +1677,9 @@ def expected_future_runs(
     market_resistance=0,
     blowout_kill=0,
     under_environment=0,
+    run_conversion=0,
+    run_prevention=0,
+    predictive_market_move=0,
 ):
     innings_left = innings_remaining_estimate(info)
     base_rate = innings_left * 0.95
@@ -1426,12 +1699,16 @@ def expected_future_runs(
     upward += (tto / 100) * 0.50
     upward += (starter_exit / 100) * 0.45
     upward += (max(0, market_resistance) / 100) * 0.60
+    upward += (run_conversion / 100) * 0.90
+    upward += (max(0, predictive_market_move) / 100) * 0.45
 
     downward += (dominance / 100) * 1.20
     downward += (fake_pressure / 100) * 0.75
     downward += (blowout_kill / 100) * 0.70
     downward += (under_environment / 100) * 0.95
+    downward += (run_prevention / 100) * 0.90
     downward += (max(0, -market_resistance) / 100) * 0.60
+    downward += (max(0, -predictive_market_move) / 100) * 0.35
     downward += max(0, 70 - current_pressure) * 0.007 if current_pressure < 40 else 0
     downward += max(0, 65 - remaining_opp) * 0.006 if remaining_opp < 45 else 0
 
@@ -1465,6 +1742,14 @@ def classify_scenario(
 ):
     mp = market_pressure(opening, live)
     total_runs = info["total_runs"]
+
+    # V2.2 predictive paths: watch before score/market fully moves.
+    # These are not automatic bets; run conversion/prevention determines WATCH vs STRIKE later.
+    if contact_trend >= 65 and stress >= 50 and market_resistance >= 0:
+        return "Predictive Market Move → Over Watch"
+
+    if fake_pressure >= 50 and under_environment >= 55:
+        return "Predictive Market Move → Under Watch"
 
     # True UNDER paths first. This fixes the prior over-only behavior.
     if mp["direction"] == "inflated" and total_runs >= 3 and under_environment >= 55 and current_pressure <= 40:
@@ -1619,6 +1904,8 @@ def live_evidence_report(info, p, q, traffic, scores, scenario, side=None):
             ("low inning pressure", scores.get("current_inning_pressure", 100) <= 35),
             ("fake pressure", scores.get("fake_pressure", 0) >= 45),
             ("under environment", scores.get("under_environment", 0) >= 50),
+            ("run prevention", scores.get("run_prevention", 0) >= 60),
+            ("predictive under move", scores.get("predictive_market_move", 0) <= -MIN_PREDICTIVE_MARKET_MOVE_FOR_WATCH),
             ("market inflated", scores.get("market_resistance", 0) <= -20),
             ("limited remaining opportunity", scores.get("remaining_opportunity", 100) <= 40),
         ]
@@ -1630,6 +1917,8 @@ def live_evidence_report(info, p, q, traffic, scores, scenario, side=None):
             ("current inning pressure", scores.get("current_inning_pressure", 0) >= 60),
             ("bullpen risk", scores.get("bullpen_risk", 0) >= 55),
             ("starter exit risk", scores.get("starter_exit_probability", 0) >= 55),
+            ("run conversion", scores.get("run_conversion", 0) >= 60),
+            ("predictive market move", scores.get("predictive_market_move", 0) >= MIN_PREDICTIVE_MARKET_MOVE_FOR_WATCH),
             ("times through order", scores.get("times_through_order", 0) >= 45),
             ("false dominance", scores.get("false_dominance", 0) >= 50),
             ("recent traffic", traffic.get("recent_baserunners", 0) >= 3),
@@ -1677,7 +1966,7 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
         evidence = live_evidence_report(info, p, q, traffic, scores, scenario, side="OVER")
         if evidence["ok"]:
             confidence = confidence_score("OVER", edge, scenario, scores, evidence, scores.get("market_resistance", 0))
-            action = action_from_confidence("OVER", confidence, edge)
+            action = action_from_confidence("OVER", confidence, edge, scores)
             if action != "NO_PLAY":
                 candidates.append({
                     "market_type": "Full Game Total",
@@ -1698,7 +1987,7 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
         evidence = live_evidence_report(info, p, q, traffic, scores, scenario, side="UNDER")
         if evidence["ok"]:
             confidence = confidence_score("UNDER", edge, scenario, scores, evidence, scores.get("market_resistance", 0))
-            action = action_from_confidence("UNDER", confidence, edge)
+            action = action_from_confidence("UNDER", confidence, edge, scores)
             if action != "NO_PLAY":
                 candidates.append({
                     "market_type": "Full Game Total",
@@ -1714,6 +2003,50 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
                     "confidence": confidence,
                     "action": action,
                 })
+
+    # Predictive market move WATCH: pressure building before market fully moves.
+    if SEND_WATCH_ALERTS and not candidates:
+        predictive = scores.get("predictive_market_move", 0)
+        if predictive >= MIN_PREDICTIVE_MARKET_MOVE_FOR_WATCH and price_ok(over_price, abs(edge) if edge else MIN_WATCH_EDGE_RUNS):
+            evidence = live_evidence_report(info, p, q, traffic, scores, "Predictive Market Move → Over Watch", side="OVER")
+            if evidence["ok"]:
+                watch_edge = max(edge, MIN_WATCH_EDGE_RUNS)
+                confidence = confidence_score("OVER", watch_edge, "Predictive Market Move → Over Watch", scores, evidence, scores.get("market_resistance", 0))
+                if confidence >= MIN_WATCH_CONFIDENCE:
+                    candidates.append({
+                        "market_type": "Full Game Total",
+                        "side": "OVER",
+                        "line": live,
+                        "price": over_price,
+                        "edge": round(watch_edge, 1),
+                        "edge_grade": "Watch",
+                        "scenario": "Predictive Market Move → Over Watch",
+                        "scores": scores,
+                        "projected_total": projected_total,
+                        "evidence": evidence,
+                        "confidence": confidence,
+                        "action": "WATCH",
+                    })
+        elif predictive <= -MIN_PREDICTIVE_MARKET_MOVE_FOR_WATCH and price_ok(under_price, abs(edge) if edge else MIN_WATCH_EDGE_RUNS):
+            evidence = live_evidence_report(info, p, q, traffic, scores, "Predictive Market Move → Under Watch", side="UNDER")
+            if evidence["ok"]:
+                watch_edge = min(edge, -MIN_WATCH_EDGE_RUNS)
+                confidence = confidence_score("UNDER", watch_edge, "Predictive Market Move → Under Watch", scores, evidence, scores.get("market_resistance", 0))
+                if confidence >= MIN_WATCH_CONFIDENCE:
+                    candidates.append({
+                        "market_type": "Full Game Total",
+                        "side": "UNDER",
+                        "line": live,
+                        "price": under_price,
+                        "edge": round(watch_edge, 1),
+                        "edge_grade": "Watch",
+                        "scenario": "Predictive Market Move → Under Watch",
+                        "scores": scores,
+                        "projected_total": projected_total,
+                        "evidence": evidence,
+                        "confidence": confidence,
+                        "action": "WATCH",
+                    })
 
     if not candidates:
         return None
@@ -1841,6 +2174,16 @@ def describe_reasons(info, p, q, traffic, hitters, scores, scenario):
     if scores.get("under_environment", 0) >= 55:
         reasons.append(f"Under environment is active ({scores['under_environment']}/100)")
 
+    if scores.get("run_conversion", 0) >= 60:
+        reasons.append(f"Run conversion supports OVER ({scores['run_conversion']}/100)")
+
+    if scores.get("run_prevention", 0) >= 60:
+        reasons.append(f"Run prevention supports UNDER ({scores['run_prevention']}/100)")
+
+    if abs(scores.get("predictive_market_move", 0)) >= MIN_PREDICTIVE_MARKET_MOVE_FOR_WATCH:
+        direction = "OVER" if scores.get("predictive_market_move", 0) > 0 else "UNDER"
+        reasons.append(f"Predictive market move signal supports {direction} ({scores['predictive_market_move']}/100)")
+
     if scores.get("market_resistance", 0) >= 25:
         reasons.append(f"Market resistance supports OVER (+{scores['market_resistance']})")
     elif scores.get("market_resistance", 0) <= -25:
@@ -1853,7 +2196,9 @@ def describe_reasons(info, p, q, traffic, hitters, scores, scenario):
     if q["movement_drop"] >= 2:
         reasons.append(f"Movement drop detected: {q['movement_drop']}")
 
-    if "Slow Start" in scenario:
+    if "Predictive Market Move" in scenario:
+        reasons.append("Interpretation: leading indicators are building before the market fully adjusts")
+    elif "Slow Start" in scenario:
         reasons.append("Interpretation: scoreboard is quiet, but pressure suggests scoring may be delayed")
     elif "Inflated" in scenario:
         reasons.append("Interpretation: live total may have overreacted to early scoring")
@@ -1878,9 +2223,17 @@ def format_alert(label, start_label, info, market_context, opportunity, p, q, tr
     price_text = opportunity["price"] if opportunity["price"] is not None else "N/A"
     action = opportunity.get("action", "STRIKE")
     instruction = "BET NOW" if action == "STRIKE" else "WATCH ONLY - wait for better price/confirmation"
+    entry_guidance = best_entry_guidance(
+        opportunity.get("side"),
+        opportunity.get("line"),
+        market_context.get("opening_total"),
+        opportunity.get("edge", 0),
+        action,
+        scores,
+    )
 
     return (
-        f"SHIFT MLB V2.1 {action}\n\n"
+        f"SHIFT MLB V2.2 {action}\n\n"
         f"{label}\n"
         f"Start: {start_label}\n\n"
         f"Instruction:\n"
@@ -1897,7 +2250,8 @@ def format_alert(label, start_label, info, market_context, opportunity, p, q, tr
         f"Opening/First Captured Total: {market_context.get('opening_total')}\n"
         f"Live Line: {opportunity['line']}\n"
         f"Projected Final: {opportunity['projected_total']}\n"
-        f"Model Edge: {edge_sign}{opportunity['edge']} runs\n\n"
+        f"Model Edge: {edge_sign}{opportunity['edge']} runs\n"
+        f"Entry Guidance: {entry_guidance}\n\n"
         f"Score: {info['away_runs']}-{info['home_runs']}\n"
         f"Inning: {info['inning_state']} {info['inning']}\n"
         f"Base/Out: {info['base_state']['label']}, {info['outs']} out(s)\n\n"
@@ -1914,6 +2268,9 @@ def format_alert(label, start_label, info, market_context, opportunity, p, q, tr
         f"Times Through Order: {scores.get('times_through_order', 0)}/100\n"
         f"Fake Pressure: {scores.get('fake_pressure', 0)}/100\n"
         f"Under Environment: {scores.get('under_environment', 0)}/100\n"
+        f"Run Conversion: {scores.get('run_conversion', 0)}/100\n"
+        f"Run Prevention: {scores.get('run_prevention', 0)}/100\n"
+        f"Predictive Market Move: {scores.get('predictive_market_move', 0)}/100\n"
         f"Market Resistance: {scores.get('market_resistance', 0)}\n"
         f"Run Suppression: {scores['run_suppression']}/100\n"
         f"False Dominance: {scores['false_dominance']}/100\n"
@@ -2025,6 +2382,29 @@ def main():
                 market_res = market_resistance_score(opening_total, live_total, info, current_pressure, contact, dominance)
                 blowout = blowout_kill_score(info)
                 under_env = under_environment_score(info, p, q, traffic, dominance, contact, current_pressure, remaining_opp, fake_pressure, blowout)
+                run_conversion = run_conversion_score(info, p, q, traffic, hitters, current_pressure, remaining_opp, stress, contact, lineup_pressure, contact_trend, tto, starter_exit, fake_pressure)
+                run_prevention = run_prevention_score(info, p, q, traffic, dominance, contact, current_pressure, remaining_opp, fake_pressure, under_env, blowout)
+
+                # Temporary score dict for predictive market-move calculation.
+                pre_scores = {
+                    "current_inning_pressure": current_pressure,
+                    "remaining_opportunity": remaining_opp,
+                    "pitcher_stress": stress,
+                    "dominance": dominance,
+                    "contact_quality": contact,
+                    "contact_trend": contact_trend,
+                    "lineup_pressure": lineup_pressure,
+                    "bullpen_risk": bullpen,
+                    "starter_exit_probability": starter_exit,
+                    "times_through_order": tto,
+                    "fake_pressure": fake_pressure,
+                    "market_resistance": market_res,
+                    "blowout_kill": blowout,
+                    "under_environment": under_env,
+                    "run_conversion": run_conversion,
+                    "run_prevention": run_prevention,
+                }
+                predictive_move = predictive_market_move_score(opening_total, live_total, info, p, q, traffic, pre_scores)
 
                 expected_future = expected_future_runs(
                     info,
@@ -2044,6 +2424,9 @@ def main():
                     market_res,
                     blowout,
                     under_env,
+                    run_conversion,
+                    run_prevention,
+                    predictive_move,
                 )
 
                 projected_total = projected_final_total(info, expected_future)
@@ -2085,6 +2468,9 @@ def main():
                     "market_resistance": market_res,
                     "blowout_kill": blowout,
                     "under_environment": under_env,
+                    "run_conversion": run_conversion,
+                    "run_prevention": run_prevention,
+                    "predictive_market_move": predictive_move,
                     "run_suppression": suppression,
                     "false_dominance": false_dom,
                 }
@@ -2116,7 +2502,7 @@ def main():
                     f"Scenario {scenario} | "
                     f"CIP {current_pressure} RO {remaining_opp} Stress {stress} Dom {dominance} Contact {contact} "
                     f"Trend {contact_trend} Lineup {lineup_pressure} Bullpen {bullpen} Exit {starter_exit} TTO {tto} "
-                    f"Fake {fake_pressure} UnderEnv {under_env} MarketRes {market_res} Supp {suppression} FalseDom {false_dom} | "
+                    f"Fake {fake_pressure} UnderEnv {under_env} Conv {run_conversion} Prev {run_prevention} PredMove {predictive_move} MarketRes {market_res} Supp {suppression} FalseDom {false_dom} | "
                     f"Pitcher {info['pitcher_name']} PC {p['pitch_count']} H/W/K {p['hits']}/{p['walks']}/{p['strikeouts']} | "
                     f"Next {format_hitters(hitters)}"
                 )
