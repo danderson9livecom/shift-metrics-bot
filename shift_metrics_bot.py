@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V2.3.1 WINNER PATTERN ENHANCEMENTS
+SHIFT MLB V2.3.2 FINAL GAME LOCK + WINNER PATTERN ENHANCEMENTS
 
 Professional live MLB totals monitor.
 V2.2.1 adds:
@@ -214,6 +214,74 @@ TEAM_MAP = {
     "Toronto Blue Jays": "Blue Jays",
     "Washington Nationals": "Nationals",
 }
+
+
+FINAL_STATUS_WORDS = {
+    "final",
+    "game over",
+    "completed early",
+    "completed",
+    "cancelled",
+    "canceled",
+    "postponed",
+    "suspended",
+}
+
+
+def normalize_status(status):
+    return str(status or "").strip().lower()
+
+
+def is_final_status(status):
+    """
+    Current-day final lock.
+    Once a game is final/completed/postponed/suspended/cancelled today,
+    stop tracking it for the rest of the day.
+    State resets automatically on a new calendar day through load_state().
+    """
+    s = normalize_status(status)
+    if not s:
+        return False
+    return s in FINAL_STATUS_WORDS or s.startswith("final")
+
+
+def schedule_status(game):
+    status = game.get("status", {}) or {}
+    return (
+        status.get("abstractGameState")
+        or status.get("detailedState")
+        or status.get("codedGameState")
+        or ""
+    )
+
+
+def schedule_label(game):
+    home = game.get("teams", {}).get("home", {}).get("team", {}).get("name", "Home")
+    away = game.get("teams", {}).get("away", {}).get("team", {}).get("name", "Away")
+    return f"{away} at {home}"
+
+
+def is_final_locked_today(state, game_pk):
+    """
+    State file resets daily. If a game is marked final today, skip it completely.
+    """
+    return bool(state.setdefault("final_games", {}).get(str(game_pk)))
+
+
+def mark_final_locked_today(state, game_pk, label="", status="", score=""):
+    state.setdefault("final_games", {})[str(game_pk)] = {
+        "date": today(),
+        "label": label,
+        "status": status,
+        "score": score,
+        "locked_at": now_local().isoformat(),
+    }
+    games = state.setdefault("games", {})
+    games.setdefault(str(game_pk), {})
+    games[str(game_pk)]["final_locked"] = True
+    games[str(game_pk)]["final_status"] = status
+    games[str(game_pk)]["final_score"] = score
+
 
 
 def now_local():
@@ -488,14 +556,16 @@ def log_clv_snapshot(info, opportunity, current_live_total):
 
 def load_state():
     if not os.path.exists(STATE_FILE):
-        return {"date": today(), "games": {}}
+        return {"date": today(), "games": {}, "final_games": {}}
     try:
         with open(STATE_FILE, "r") as f:
             state = json.load(f)
     except Exception:
-        return {"date": today(), "games": {}}
+        return {"date": today(), "games": {}, "final_games": {}}
     if state.get("date") != today():
-        return {"date": today(), "games": {}}
+        return {"date": today(), "games": {}, "final_games": {}}
+    state.setdefault("games", {})
+    state.setdefault("final_games", {})
     return state
 
 
@@ -3521,6 +3591,21 @@ def main():
             # or already active. If all games are too far away, stay dormant and skip odds.
             needs_odds = False
             for sg in games:
+                sg_pk = str(sg["gamePk"])
+                if is_final_locked_today(state, sg_pk):
+                    continue
+
+                sg_status = schedule_status(sg)
+                if is_final_status(sg_status):
+                    mark_final_locked_today(
+                        state,
+                        sg_pk,
+                        schedule_label(sg),
+                        sg_status,
+                        "",
+                    )
+                    continue
+
                 st = parse_start_time(sg)
                 if st is None or should_fetch_feed(st):
                     needs_odds = True
@@ -3535,6 +3620,23 @@ def main():
             for g in games:
                 game_pk = str(g["gamePk"])
                 start_time = parse_start_time(g)
+
+                if is_final_locked_today(state, game_pk):
+                    print(f"SKIP FINAL | {schedule_label(g)} | already final-locked for {today()}")
+                    continue
+
+                g_status = schedule_status(g)
+                if is_final_status(g_status):
+                    mark_final_locked_today(
+                        state,
+                        game_pk,
+                        schedule_label(g),
+                        g_status,
+                        "",
+                    )
+                    print(f"FINAL LOCKED | {schedule_label(g)} | Status {g_status} | no more tracking today")
+                    save_state(state)
+                    continue
 
                 if game_pk not in state["games"]:
                     state["games"][game_pk] = {
@@ -3555,7 +3657,20 @@ def main():
 
                 label = f"{info['away']} at {info['home']}"
                 start_label = info["start_time"].strftime("%I:%M %p AZ") if info["start_time"] else "Unknown"
-                mode = "ACTIVE" if info["status"] == "Live" else "FINAL" if info["status"] == "Final" else "DORMANT"
+                mode = "ACTIVE" if info["status"] == "Live" else "FINAL" if is_final_status(info["status"]) else "DORMANT"
+
+                if is_final_status(info["status"]):
+                    final_score = f"{info['away_runs']}-{info['home_runs']}"
+                    mark_final_locked_today(
+                        state,
+                        game_pk,
+                        label,
+                        info["status"],
+                        final_score,
+                    )
+                    print(f"FINAL LOCKED | {label} | Score {final_score} | no more tracking today")
+                    save_state(state)
+                    continue
 
                 markets = find_markets(odds, info["home"], info["away"])
                 live_total = markets["total"]["point"]
