@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V2.3.2 FINAL GAME LOCK + WINNER PATTERN ENHANCEMENTS
+SHIFT MLB V2.3.3 SELF-LEARNING TRACKER + FINAL LOCK
 
 Professional live MLB totals monitor.
 V2.2.1 adds:
@@ -56,6 +56,10 @@ STATE_FILE = os.getenv("STATE_FILE", "shift_v2_state.json")
 
 STRIKE_HISTORY_FILE = os.getenv("STRIKE_HISTORY_FILE", "strike_history.csv")
 CLV_HISTORY_FILE = os.getenv("CLV_HISTORY_FILE", "clv_history.csv")
+GRADED_RESULTS_FILE = os.getenv("GRADED_RESULTS_FILE", "graded_results.csv")
+LEARNING_SUMMARY_FILE = os.getenv("LEARNING_SUMMARY_FILE", "learning_summary.csv")
+ENABLE_SELF_LEARNING = os.getenv("ENABLE_SELF_LEARNING", "true").lower() == "true"
+
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
@@ -363,6 +367,414 @@ def csv_append_once(path, fieldnames, row):
         print(f"CSV LOG ERROR {path}:", repr(e))
 
 
+
+def csv_read_rows(path):
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", newline="") as f:
+            return list(csv.DictReader(f))
+    except Exception as e:
+        print(f"CSV READ ERROR {path}:", repr(e))
+        return []
+
+
+def csv_write_rows(path, fieldnames, rows):
+    try:
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: row.get(k, "") for k in fieldnames})
+    except Exception as e:
+        print(f"CSV WRITE ERROR {path}:", repr(e))
+
+
+def game_key_from_info(info):
+    return f"{today()}::{info.get('away')} at {info.get('home')}"
+
+
+def score_text(info):
+    return f"{info.get('away_runs', 0)}-{info.get('home_runs', 0)}"
+
+
+def final_total_from_score(score):
+    try:
+        parts = str(score).replace(" ", "").split("-")
+        if len(parts) != 2:
+            return None
+        return int(parts[0]) + int(parts[1])
+    except Exception:
+        return None
+
+
+def schedule_final_score(game):
+    try:
+        away = game.get("teams", {}).get("away", {}).get("score")
+        home = game.get("teams", {}).get("home", {}).get("score")
+        if away is None or home is None:
+            return ""
+        return f"{away}-{home}"
+    except Exception:
+        return ""
+
+
+def grade_bet(side, line, final_total):
+    line = safe_float(line, None)
+    final_total = safe_float(final_total, None)
+    if line is None or final_total is None:
+        return "UNKNOWN"
+    side = str(side or "").upper()
+    if final_total == line:
+        return "PUSH"
+    if side == "OVER":
+        return "WIN" if final_total > line else "LOSS"
+    if side == "UNDER":
+        return "WIN" if final_total < line else "LOSS"
+    return "UNKNOWN"
+
+
+def pattern_tags_from_row(row):
+    tags = []
+    side = str(row.get("side", "")).upper()
+    if side:
+        tags.append(side)
+
+    inning = safe_int(row.get("inning"), 0)
+    if inning:
+        if inning <= 3:
+            tags.append("EARLY")
+        elif inning <= 6:
+            tags.append("MID")
+        else:
+            tags.append("LATE")
+
+    base_out = str(row.get("base_out", "")).lower()
+    if "bases loaded" in base_out:
+        tags.append("BASES_LOADED")
+    elif "1st and 3rd" in base_out or "2nd and 3rd" in base_out:
+        tags.append("MULTI_RUNNERS_SCORING")
+    elif "runner on 2nd" in base_out or "runner on 3rd" in base_out:
+        tags.append("SCORING_POSITION")
+    elif "bases empty" in base_out:
+        tags.append("BASES_EMPTY")
+
+    outs = safe_int(row.get("outs"), -1)
+    if outs == 0:
+        tags.append("NO_OUTS")
+    elif outs == 1:
+        tags.append("ONE_OUT")
+    elif outs == 2:
+        tags.append("TWO_OUTS")
+
+    stress = safe_int(row.get("stress"), 0)
+    contact = safe_int(row.get("contact"), 0)
+    p2r = safe_int(row.get("p2r"), 0)
+    conv = safe_int(row.get("conv"), 0)
+    prev = safe_int(row.get("prev"), 0)
+    pred = safe_int(row.get("pred_move"), 0)
+    threat = safe_int(row.get("threat_index"), 0)
+    stack = safe_int(row.get("signal_stack"), 0)
+    lag = safe_int(row.get("market_lag"), 0)
+
+    if stress >= 80:
+        tags.append("STRESS_80_PLUS")
+    elif stress >= 65:
+        tags.append("STRESS_65_PLUS")
+
+    if contact >= 70:
+        tags.append("CONTACT_70_PLUS")
+    elif contact >= 55:
+        tags.append("CONTACT_55_PLUS")
+
+    if p2r >= 85:
+        tags.append("P2R_85_PLUS")
+    elif p2r >= 70:
+        tags.append("P2R_70_PLUS")
+
+    if conv >= 80:
+        tags.append("CONV_80_PLUS")
+    elif conv >= 65:
+        tags.append("CONV_65_PLUS")
+
+    if prev >= 75:
+        tags.append("PREV_75_PLUS")
+    elif prev >= 60:
+        tags.append("PREV_60_PLUS")
+
+    if pred >= 75:
+        tags.append("PRED_75_PLUS")
+
+    if threat >= 85:
+        tags.append("THREAT_85_PLUS")
+    elif threat >= 70:
+        tags.append("THREAT_70_PLUS")
+
+    if stack >= 5:
+        tags.append("STACK_5_PLUS")
+    elif stack >= 4:
+        tags.append("STACK_4_PLUS")
+
+    if lag >= 80:
+        tags.append("LAG_80_PLUS")
+    elif lag >= 60:
+        tags.append("LAG_60_PLUS")
+
+    return tags
+
+
+def strike_fieldnames():
+    return [
+        "strike_id", "timestamp", "date", "game_key", "game_pk", "game",
+        "side", "line", "price",
+        "opening_total", "live_total", "projected_total", "edge", "edge_grade",
+        "inning", "inning_state", "outs", "score", "base_out",
+        "projection_score", "confirmation_score",
+        "stress", "contact", "p2r", "conv", "prev", "pred_move",
+        "threat_index", "signal_stack", "market_lag", "conv_acceleration",
+        "scenario", "action", "pattern_tags",
+        "final_score", "final_total", "result", "graded_at",
+    ]
+
+
+def graded_fieldnames():
+    return strike_fieldnames()
+
+
+def learning_summary_fieldnames():
+    return [
+        "updated_at", "pattern", "side", "total", "wins", "losses", "pushes",
+        "win_pct", "sample_note", "recommendation",
+    ]
+
+
+def build_learning_summary():
+    if not ENABLE_SELF_LEARNING:
+        return []
+
+    rows = csv_read_rows(GRADED_RESULTS_FILE)
+    graded = [r for r in rows if r.get("result") in ["WIN", "LOSS", "PUSH"]]
+    if not graded:
+        return []
+
+    buckets = {}
+
+    def add_bucket(pattern, row):
+        side = str(row.get("side", "")).upper()
+        key = (pattern, side)
+        node = buckets.setdefault(key, {"total": 0, "wins": 0, "losses": 0, "pushes": 0})
+        node["total"] += 1
+        if row.get("result") == "WIN":
+            node["wins"] += 1
+        elif row.get("result") == "LOSS":
+            node["losses"] += 1
+        elif row.get("result") == "PUSH":
+            node["pushes"] += 1
+
+    for row in graded:
+        tags = row.get("pattern_tags", "")
+        tag_list = [t for t in tags.split("|") if t]
+
+        # Single-pattern buckets.
+        for t in tag_list:
+            add_bucket(t, row)
+
+        # High-value combinations we care about professionally.
+        combos = [
+            ("P2R_85_PLUS+CONV_80_PLUS", {"P2R_85_PLUS", "CONV_80_PLUS"}),
+            ("STRESS_80_PLUS+P2R_85_PLUS", {"STRESS_80_PLUS", "P2R_85_PLUS"}),
+            ("THREAT_70_PLUS+P2R_70_PLUS", {"THREAT_70_PLUS", "P2R_70_PLUS"}),
+            ("STACK_5_PLUS+LAG_60_PLUS", {"STACK_5_PLUS", "LAG_60_PLUS"}),
+            ("LATE+BASES_EMPTY", {"LATE", "BASES_EMPTY"}),
+            ("LATE+PREV_75_PLUS", {"LATE", "PREV_75_PLUS"}),
+            ("CONTACT_70_PLUS+CONV_80_PLUS", {"CONTACT_70_PLUS", "CONV_80_PLUS"}),
+        ]
+        tag_set = set(tag_list)
+        for label, required in combos:
+            if required.issubset(tag_set):
+                add_bucket(label, row)
+
+    output = []
+    now = now_local().isoformat()
+    for (pattern, side), stats in sorted(buckets.items(), key=lambda kv: (kv[1]["total"], kv[1]["wins"]), reverse=True):
+        total = stats["total"]
+        if total <= 0:
+            continue
+        wins = stats["wins"]
+        losses = stats["losses"]
+        pushes = stats["pushes"]
+        denom = max(1, wins + losses)
+        win_pct = round((wins / denom) * 100, 1)
+
+        if total < 5:
+            note = "Small sample"
+            recommendation = "Track only"
+        elif win_pct >= 62:
+            note = "Strong historical pattern"
+            recommendation = "Boost confidence"
+        elif win_pct <= 45:
+            note = "Weak historical pattern"
+            recommendation = "Caution flag"
+        else:
+            note = "Neutral historical pattern"
+            recommendation = "No adjustment"
+
+        output.append({
+            "updated_at": now,
+            "pattern": pattern,
+            "side": side,
+            "total": total,
+            "wins": wins,
+            "losses": losses,
+            "pushes": pushes,
+            "win_pct": win_pct,
+            "sample_note": note,
+            "recommendation": recommendation,
+        })
+
+    csv_write_rows(LEARNING_SUMMARY_FILE, learning_summary_fieldnames(), output)
+    return output
+
+
+def historical_pattern_note(info, opportunity):
+    """
+    Reads our own graded history and returns a short note for the alert.
+    This does not block alerts. It only informs us whether similar past alerts
+    have been strong, weak, or still too small of a sample.
+    """
+    if not ENABLE_SELF_LEARNING:
+        return "Historical Match: tracking disabled"
+
+    scores = opportunity.get("scores", {})
+    row = {
+        "side": opportunity.get("side"),
+        "inning": info.get("inning"),
+        "outs": info.get("outs"),
+        "base_out": f"{info.get('base_state', {}).get('label', '')}, {info.get('outs')} out(s)",
+        "stress": scores.get("pitcher_stress"),
+        "contact": scores.get("contact_quality"),
+        "p2r": scores.get("pressure_to_runs"),
+        "conv": scores.get("run_conversion"),
+        "prev": scores.get("run_prevention"),
+        "pred_move": scores.get("predictive_market_move"),
+        "threat_index": scores.get("threat_index"),
+        "signal_stack": scores.get("signal_stack"),
+        "market_lag": scores.get("market_lag"),
+    }
+
+    tags = set(pattern_tags_from_row(row))
+    graded = [r for r in csv_read_rows(GRADED_RESULTS_FILE) if r.get("result") in ["WIN", "LOSS", "PUSH"]]
+
+    if not graded:
+        return "Historical Match: building sample"
+
+    best = None
+    for r in graded:
+        r_tags = set((r.get("pattern_tags") or "").split("|"))
+        overlap = len(tags.intersection(r_tags))
+        if str(r.get("side", "")).upper() == str(opportunity.get("side", "")).upper():
+            overlap += 2
+        if overlap <= 1:
+            continue
+        if best is None or overlap > best[0]:
+            best = (overlap, [])
+
+    # Instead of nearest-neighbor only, use all rows with strong tag overlap.
+    similar = []
+    for r in graded:
+        r_tags = set((r.get("pattern_tags") or "").split("|"))
+        overlap = len(tags.intersection(r_tags))
+        if str(r.get("side", "")).upper() == str(opportunity.get("side", "")).upper():
+            overlap += 2
+        if overlap >= 4:
+            similar.append(r)
+
+    if len(similar) < 5:
+        return f"Historical Match: small sample ({len(similar)} similar)"
+
+    wins = sum(1 for r in similar if r.get("result") == "WIN")
+    losses = sum(1 for r in similar if r.get("result") == "LOSS")
+    pushes = sum(1 for r in similar if r.get("result") == "PUSH")
+    denom = max(1, wins + losses)
+    pct = round((wins / denom) * 100, 1)
+
+    if pct >= 62:
+        strength = "Strong"
+    elif pct <= 45:
+        strength = "Caution"
+    else:
+        strength = "Neutral"
+
+    return f"Historical Match: {wins}-{losses}-{pushes} ({pct}%) | {strength}"
+
+
+def grade_completed_strikes(game_pk, label, final_score):
+    """
+    When a game goes final, grade all stored STRIKE rows for that game.
+    This is the core self-learning loop:
+    strike alert -> final score -> WIN/LOSS/PUSH -> pattern database.
+    """
+    if not ENABLE_SELF_LEARNING:
+        return
+
+    final_total = final_total_from_score(final_score)
+    if final_total is None:
+        return
+
+    rows = csv_read_rows(STRIKE_HISTORY_FILE)
+    if not rows:
+        return
+
+    changed = False
+    newly_graded = []
+
+    for row in rows:
+        same_game = (
+            row.get("date") == today()
+            and (
+                row.get("game_pk") == str(game_pk)
+                or row.get("game") == label
+                or row.get("game_key") == f"{today()}::{label}"
+            )
+        )
+        if not same_game:
+            continue
+        if row.get("action") != "STRIKE":
+            continue
+        if row.get("result") in ["WIN", "LOSS", "PUSH"]:
+            continue
+
+        result = grade_bet(row.get("side"), row.get("line"), final_total)
+        row["final_score"] = final_score
+        row["final_total"] = final_total
+        row["result"] = result
+        row["graded_at"] = now_local().isoformat()
+        if not row.get("pattern_tags"):
+            row["pattern_tags"] = "|".join(pattern_tags_from_row(row))
+        newly_graded.append(dict(row))
+        changed = True
+
+    if changed:
+        csv_write_rows(STRIKE_HISTORY_FILE, strike_fieldnames(), rows)
+
+        existing = csv_read_rows(GRADED_RESULTS_FILE)
+        existing_ids = {r.get("strike_id") for r in existing}
+        for row in newly_graded:
+            if row.get("strike_id") not in existing_ids:
+                existing.append(row)
+                existing_ids.add(row.get("strike_id"))
+        csv_write_rows(GRADED_RESULTS_FILE, graded_fieldnames(), existing)
+
+        summary = build_learning_summary()
+        wins = sum(1 for r in newly_graded if r.get("result") == "WIN")
+        losses = sum(1 for r in newly_graded if r.get("result") == "LOSS")
+        pushes = sum(1 for r in newly_graded if r.get("result") == "PUSH")
+        print(
+            f"SELF-LEARNING GRADED | {label} | Final {final_score} | "
+            f"New grades W-L-P: {wins}-{losses}-{pushes} | "
+            f"Summary patterns: {len(summary)}"
+        )
+
 def time_remaining_multiplier(info):
     """
     Moderate time-remaining adjustment.
@@ -457,8 +869,8 @@ def record_strike_lock(state, info, opportunity):
 
 def log_strike_history(info, opportunity, market_context=None):
     """
-    Logs each sent STRIKE for later analysis.
-    No API call. Just local CSV.
+    Logs each sent STRIKE for later self-learning.
+    No API call. Just local CSV memory that the bot can grade and summarize.
     """
     if not ENABLE_STRIKE_HISTORY or opportunity.get("action") != "STRIKE":
         return
@@ -466,19 +878,18 @@ def log_strike_history(info, opportunity, market_context=None):
     scores = opportunity.get("scores", {})
     market_context = market_context or {}
 
-    fieldnames = [
-        "timestamp", "date", "game", "side", "line", "price",
-        "opening_total", "live_total", "projected_total", "edge", "edge_grade",
-        "inning", "inning_state", "outs", "score",
-        "projection_score", "confirmation_score",
-        "stress", "contact", "p2r", "conv", "prev", "pred_move",
-        "threat_index", "signal_stack", "market_lag", "conv_acceleration",
-        "scenario", "action"
-    ]
+    strike_id = (
+        f"{today()}|{info.get('game_pk', '')}|{opportunity.get('side')}|"
+        f"{opportunity.get('line')}|{safe_int(info.get('inning'), 0)}|"
+        f"{safe_int(info.get('outs'), 0)}|{int(time.time())}"
+    )
 
     row = {
+        "strike_id": strike_id,
         "timestamp": now_local().isoformat(),
         "date": today(),
+        "game_key": game_key_from_info(info),
+        "game_pk": info.get("game_pk", ""),
         "game": f"{info.get('away')} at {info.get('home')}",
         "side": opportunity.get("side"),
         "line": opportunity.get("line"),
@@ -491,7 +902,8 @@ def log_strike_history(info, opportunity, market_context=None):
         "inning": info.get("inning"),
         "inning_state": info.get("inning_state"),
         "outs": info.get("outs"),
-        "score": f"{info.get('away_runs')}-{info.get('home_runs')}",
+        "score": score_text(info),
+        "base_out": f"{info.get('base_state', {}).get('label', '')}, {info.get('outs')} out(s)",
         "projection_score": scores.get("projection_score"),
         "confirmation_score": scores.get("confirmation_score"),
         "stress": scores.get("pitcher_stress"),
@@ -506,9 +918,16 @@ def log_strike_history(info, opportunity, market_context=None):
         "conv_acceleration": scores.get("conv_acceleration"),
         "scenario": opportunity.get("scenario"),
         "action": opportunity.get("action"),
+        "final_score": "",
+        "final_total": "",
+        "result": "PENDING",
+        "graded_at": "",
     }
+    row["pattern_tags"] = "|".join(pattern_tags_from_row(row))
 
-    csv_append_once(STRIKE_HISTORY_FILE, fieldnames, row)
+    csv_append_once(STRIKE_HISTORY_FILE, strike_fieldnames(), row)
+    print(f"SELF-LEARNING STORED STRIKE | {row['game']} | {row['side']} {row['line']} | {row['pattern_tags']}")
+
 
 
 def log_clv_snapshot(info, opportunity, current_live_total):
@@ -712,6 +1131,7 @@ def compact_strike_sms(msg):
     confirmation = extract_alert_value(msg, "Confirmation Score")
     need = extract_alert_value(msg, "Need Runs")
     action_window = extract_alert_value(msg, "Action Window")
+    historical = extract_alert_value(msg, "Historical Match")
 
     # Key metrics
     stress = extract_alert_value(msg, "Stress")
@@ -765,6 +1185,8 @@ def compact_strike_sms(msg):
         compact.append(need)
     if action_window:
         compact.append(action_window)
+    if historical:
+        compact.append(f"Hist: {historical}")
 
     reason_bits = []
     if stress:
@@ -985,6 +1407,7 @@ def parse_game(feed, schedule_game):
     home_runs = linescore.get("teams", {}).get("home", {}).get("runs", 0) or 0
 
     return {
+        "game_pk": str(schedule_game.get("gamePk", "")),
         "home": home,
         "away": away,
         "status": status,
@@ -3498,9 +3921,10 @@ def format_alert(label, start_label, info, market_context, opportunity, p, q, tr
         action,
         scores,
     )
+    history_note = historical_pattern_note(info, opportunity)
 
     return (
-        f"SHIFT MLB V2.3.1 WINNER PATTERN ENHANCEMENTS {action}\n\n"
+        f"SHIFT MLB V2.3.3 SELF-LEARNING TRACKER {action}\n\n"
         f"{label}\n"
         f"Start: {start_label}\n\n"
         f"Instruction:\n"
@@ -3518,7 +3942,8 @@ def format_alert(label, start_label, info, market_context, opportunity, p, q, tr
         f"Live Line: {opportunity['line']}\n"
         f"Proj: {opportunity['projected_total']}\n"
         f"Edge: {edge_sign}{opportunity['edge']} runs\n"
-        f"Entry Guidance: {entry_guidance}\n\n"
+        f"Entry Guidance: {entry_guidance}\n"
+        f"{history_note}\n\n"
         f"Score: {info['away_runs']}-{info['home_runs']}\n"
         f"Inning: {info['inning_state']} {info['inning']}\n"
         f"Base/Out: {info['base_state']['label']}, {info['outs']} out(s)\n\n"
@@ -3578,6 +4003,7 @@ def determine_next_sleep(any_live, any_near_strike):
 
 def main():
     state = load_state()
+    build_learning_summary()
 
     while True:
         any_live = False
@@ -3597,13 +4023,17 @@ def main():
 
                 sg_status = schedule_status(sg)
                 if is_final_status(sg_status):
+                    sg_label = schedule_label(sg)
+                    sg_score = schedule_final_score(sg)
                     mark_final_locked_today(
                         state,
                         sg_pk,
-                        schedule_label(sg),
+                        sg_label,
                         sg_status,
-                        "",
+                        sg_score,
                     )
+                    if sg_score:
+                        grade_completed_strikes(sg_pk, sg_label, sg_score)
                     continue
 
                 st = parse_start_time(sg)
@@ -3627,14 +4057,18 @@ def main():
 
                 g_status = schedule_status(g)
                 if is_final_status(g_status):
+                    g_label = schedule_label(g)
+                    g_score = schedule_final_score(g)
                     mark_final_locked_today(
                         state,
                         game_pk,
-                        schedule_label(g),
+                        g_label,
                         g_status,
-                        "",
+                        g_score,
                     )
-                    print(f"FINAL LOCKED | {schedule_label(g)} | Status {g_status} | no more tracking today")
+                    if g_score:
+                        grade_completed_strikes(game_pk, g_label, g_score)
+                    print(f"FINAL LOCKED | {g_label} | Status {g_status} | Score {g_score or 'Unknown'} | no more tracking today")
                     save_state(state)
                     continue
 
@@ -3668,6 +4102,7 @@ def main():
                         info["status"],
                         final_score,
                     )
+                    grade_completed_strikes(game_pk, label, final_score)
                     print(f"FINAL LOCKED | {label} | Score {final_score} | no more tracking today")
                     save_state(state)
                     continue
@@ -3900,6 +4335,15 @@ def main():
                         flags,
                     )
                     send_text(msg)
+                    log_strike_history(
+                        info,
+                        opportunity,
+                        {
+                            "opening_total": opening_total,
+                            "live_total": live_total,
+                        },
+                    )
+                    record_strike_lock(state, info, opportunity)
 
                 save_state(state)
 
