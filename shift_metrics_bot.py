@@ -4,13 +4,14 @@ import json
 import math
 import csv
 import requests
+from urllib.parse import urlparse
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V2.3.3 SELF-LEARNING TRACKER + FINAL LOCK
+SHIFT MLB V2.4.2 TRACKING + ACTIONABLE RECOMMENDATIONS + RESULT SMS
 
 Professional live MLB totals monitor.
 V2.2.1 adds:
@@ -59,6 +60,32 @@ CLV_HISTORY_FILE = os.getenv("CLV_HISTORY_FILE", "clv_history.csv")
 GRADED_RESULTS_FILE = os.getenv("GRADED_RESULTS_FILE", "graded_results.csv")
 LEARNING_SUMMARY_FILE = os.getenv("LEARNING_SUMMARY_FILE", "learning_summary.csv")
 ENABLE_SELF_LEARNING = os.getenv("ENABLE_SELF_LEARNING", "true").lower() == "true"
+
+# Daily learning report:
+# Prints a summary to Railway logs after games finish and optionally texts it.
+ENABLE_DAILY_LEARNING_REPORT = os.getenv("ENABLE_DAILY_LEARNING_REPORT", "true").lower() == "true"
+SEND_DAILY_LEARNING_REPORT_SMS = os.getenv("SEND_DAILY_LEARNING_REPORT_SMS", "true").lower() == "true"
+
+# V2.4.1 user-facing grading upgrade:
+# Sends a short result text as soon as each completed STRIKE is graded.
+# This is separate from the end-of-night daily learning report.
+ENABLE_GRADED_RESULT_SMS = os.getenv("ENABLE_GRADED_RESULT_SMS", "true").lower() == "true"
+ENABLE_GRADED_RESULT_LOG = os.getenv("ENABLE_GRADED_RESULT_LOG", "true").lower() == "true"
+MAX_RESULT_SMS_CHARS = int(os.getenv("MAX_RESULT_SMS_CHARS", "900"))
+
+# V2.4.2 persistent tracking / reporting upgrades:
+# Optional generic webhook for Google Sheets Apps Script, Zapier, Make, Supabase Edge Function, etc.
+# If blank, the bot still writes local CSV as before.
+TRACKING_WEBHOOK_URL = os.getenv("TRACKING_WEBHOOK_URL", "").strip()
+TRACKING_WEBHOOK_SECRET = os.getenv("TRACKING_WEBHOOK_SECRET", "").strip()
+ENABLE_TRACKING_WEBHOOK = os.getenv("ENABLE_TRACKING_WEBHOOK", "false").lower() == "true"
+ENABLE_CLV_POLL_SNAPSHOTS = os.getenv("ENABLE_CLV_POLL_SNAPSHOTS", "true").lower() == "true"
+CLV_SNAPSHOT_MIN_MOVE = float(os.getenv("CLV_SNAPSHOT_MIN_MOVE", "0.5"))
+ENABLE_ACTIONABLE_DAILY_RECOMMENDATIONS = os.getenv("ENABLE_ACTIONABLE_DAILY_RECOMMENDATIONS", "true").lower() == "true"
+MIN_RECOMMENDATION_SAMPLE = int(os.getenv("MIN_RECOMMENDATION_SAMPLE", "2"))
+
+DAILY_LEARNING_REPORT_HOUR = int(os.getenv("DAILY_LEARNING_REPORT_HOUR", "22"))
+MIN_PATTERN_SAMPLE_FOR_REPORT = int(os.getenv("MIN_PATTERN_SAMPLE_FOR_REPORT", "3"))
 
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
@@ -141,6 +168,17 @@ MARKET_LAG_ELITE = float(os.getenv("MARKET_LAG_ELITE", "4.0"))
 CONV_ACCEL_MIN_JUMP = int(os.getenv("CONV_ACCEL_MIN_JUMP", "15"))
 SIGNAL_STACK_STRONG = int(os.getenv("SIGNAL_STACK_STRONG", "4"))
 SIGNAL_STACK_ELITE = int(os.getenv("SIGNAL_STACK_ELITE", "5"))
+
+# V2.4.0 professional refinement layer from alert reviews:
+# Adds the profiles that mattered in our Mets/Mariners review:
+# bullpen lockdown, strikeout environment, traffic conversion, and hard-hit efficiency.
+ENABLE_PRO_REFINEMENT_LAYER = os.getenv("ENABLE_PRO_REFINEMENT_LAYER", "true").lower() == "true"
+MIN_K_ENV_UNDER_STRIKE = int(os.getenv("MIN_K_ENV_UNDER_STRIKE", "62"))
+MIN_BULLPEN_LOCKDOWN_UNDER_STRIKE = int(os.getenv("MIN_BULLPEN_LOCKDOWN_UNDER_STRIKE", "55"))
+MAX_EXTREME_TOTAL_STRIKE_LINE = float(os.getenv("MAX_EXTREME_TOTAL_STRIKE_LINE", "11.5"))
+MIN_EXTREME_TOTAL_CONFIRMATION = int(os.getenv("MIN_EXTREME_TOTAL_CONFIRMATION", "82"))
+MIN_EXTREME_TOTAL_PROJECTION = int(os.getenv("MIN_EXTREME_TOTAL_PROJECTION", "82"))
+MIN_EXTREME_TOTAL_EDGE = float(os.getenv("MIN_EXTREME_TOTAL_EDGE", "2.0"))
 
 
 # V2.2.4 decision calibration:
@@ -352,6 +390,112 @@ def market_label(price):
     return "Bad price"
 
 
+
+def tracking_webhook_enabled():
+    if not ENABLE_TRACKING_WEBHOOK or not TRACKING_WEBHOOK_URL:
+        return False
+    try:
+        parsed = urlparse(TRACKING_WEBHOOK_URL)
+        return parsed.scheme in ["http", "https"] and bool(parsed.netloc)
+    except Exception:
+        return False
+
+
+def post_tracking_event(event_type, payload):
+    """
+    Optional durable storage mirror.
+    Use TRACKING_WEBHOOK_URL for a Google Sheets Apps Script, Zapier/Make webhook,
+    Supabase Edge Function, or any endpoint that accepts JSON.
+    This does not replace local CSV; it mirrors important rows off Railway storage.
+    """
+    if not tracking_webhook_enabled():
+        return False
+
+    body = {
+        "event_type": event_type,
+        "sent_at": now_local().isoformat(),
+        "source": "SHIFT_MLB_V2_4_2",
+        "payload": payload,
+    }
+    headers = {"Content-Type": "application/json"}
+    if TRACKING_WEBHOOK_SECRET:
+        headers["X-SHIFT-SECRET"] = TRACKING_WEBHOOK_SECRET
+    try:
+        r = requests.post(TRACKING_WEBHOOK_URL, json=body, headers=headers, timeout=10)
+        if 200 <= r.status_code < 300:
+            print(f"TRACKING WEBHOOK SENT | {event_type}")
+            return True
+        print(f"TRACKING WEBHOOK ERROR | {event_type} | {r.status_code} | {r.text[:180]}")
+    except Exception as e:
+        print(f"TRACKING WEBHOOK EXCEPTION | {event_type}:", repr(e))
+    return False
+
+
+def master_score_from_scores(side, scores):
+    """
+    Reduces duplicate score noise into one master thesis score.
+    It does not replace detailed metrics; it gives the report a cleaner read.
+    """
+    side = str(side or "").upper()
+    if side == "OVER":
+        vals = [
+            safe_int(scores.get("pressure_to_runs"), 0),
+            safe_int(scores.get("run_conversion"), 0),
+            safe_int(scores.get("traffic_conversion"), 0),
+            safe_int(scores.get("hard_hit_efficiency"), 0),
+            safe_int(scores.get("pitcher_stress"), 0),
+        ]
+        weights = [0.24, 0.24, 0.20, 0.18, 0.14]
+    else:
+        vals = [
+            safe_int(scores.get("run_prevention"), 0),
+            safe_int(scores.get("strikeout_environment"), 0),
+            safe_int(scores.get("bullpen_lockdown"), 0),
+            safe_int(scores.get("hard_hit_under_support"), 0),
+            safe_int(scores.get("under_environment"), 0),
+        ]
+        weights = [0.24, 0.22, 0.20, 0.18, 0.16]
+    return round(clamp(sum(v * w for v, w in zip(vals, weights))))
+
+
+def master_market_value_score(opportunity, scores):
+    edge = abs(safe_float((opportunity or {}).get("edge"), 0))
+    proj = safe_int(scores.get("projection_score"), 0)
+    pred = safe_int(scores.get("predictive_market_move"), 0)
+    lag = safe_int(scores.get("market_lag"), 0)
+    raw = (min(edge, 3.0) / 3.0) * 40 + proj * 0.30 + pred * 0.18 + lag * 0.12
+    return round(clamp(raw))
+
+
+def master_risk_filter_score(opportunity, info, scores):
+    """
+    Higher score means higher risk / more caution.
+    Used for reports and result texts, not as a hard stop by itself.
+    """
+    side = str((opportunity or {}).get("side", "")).upper()
+    line = safe_float((opportunity or {}).get("line"), 0)
+    inning = safe_int((info or {}).get("inning"), 0)
+    fake = safe_int(scores.get("fake_pressure"), 0)
+    blowout = safe_int(scores.get("blowout_kill"), 0)
+    k_env = safe_int(scores.get("strikeout_environment"), 0)
+    bp = safe_int(scores.get("bullpen_lockdown"), 0)
+    tconv = safe_int(scores.get("traffic_conversion"), 0)
+    hheff = safe_int(scores.get("hard_hit_efficiency"), 0)
+
+    risk = 0
+    if line >= MAX_EXTREME_TOTAL_STRIKE_LINE:
+        risk += 28
+    if side == "OVER" and inning >= 7:
+        risk += 22
+    if side == "OVER" and k_env >= 65 and bp >= 55:
+        risk += 22
+    if side == "OVER" and tconv < 45 and hheff < 45:
+        risk += 18
+    if side == "UNDER" and k_env < 50 and bp < 45:
+        risk += 18
+    risk += fake * 0.12 + blowout * 0.10
+    return round(clamp(risk))
+
 def csv_append_once(path, fieldnames, row):
     """
     Lightweight local CSV logging. No extra API calls / no extra credits.
@@ -520,6 +664,37 @@ def pattern_tags_from_row(row):
     elif lag >= 60:
         tags.append("LAG_60_PLUS")
 
+    k_env = safe_int(row.get("k_env"), 0)
+    bullpen_lockdown = safe_int(row.get("bullpen_lockdown"), 0)
+    traffic_conversion = safe_int(row.get("traffic_conversion"), 0)
+    hh_eff = safe_int(row.get("hh_eff"), 0)
+    hh_under = safe_int(row.get("hh_under"), 0)
+
+    if k_env >= 75:
+        tags.append("K_ENV_75_PLUS")
+    elif k_env >= 60:
+        tags.append("K_ENV_60_PLUS")
+
+    if bullpen_lockdown >= 75:
+        tags.append("BULLPEN_LOCK_75_PLUS")
+    elif bullpen_lockdown >= 55:
+        tags.append("BULLPEN_LOCK_55_PLUS")
+
+    if traffic_conversion >= 70:
+        tags.append("TRAFFIC_CONV_70_PLUS")
+    elif traffic_conversion >= 55:
+        tags.append("TRAFFIC_CONV_55_PLUS")
+
+    if hh_eff >= 70:
+        tags.append("HH_EFF_70_PLUS")
+    elif hh_eff >= 55:
+        tags.append("HH_EFF_55_PLUS")
+
+    if hh_under >= 70:
+        tags.append("HH_UNDER_70_PLUS")
+    elif hh_under >= 55:
+        tags.append("HH_UNDER_55_PLUS")
+
     return tags
 
 
@@ -532,6 +707,8 @@ def strike_fieldnames():
         "projection_score", "confirmation_score",
         "stress", "contact", "p2r", "conv", "prev", "pred_move",
         "threat_index", "signal_stack", "market_lag", "conv_acceleration",
+        "k_env", "bullpen_lockdown", "traffic_conversion", "hh_eff", "hh_under",
+        "over_pressure_score", "under_suppression_score", "market_value_score", "risk_filter_score",
         "scenario", "action", "pattern_tags",
         "final_score", "final_total", "result", "graded_at",
     ]
@@ -588,6 +765,9 @@ def build_learning_summary():
             ("LATE+BASES_EMPTY", {"LATE", "BASES_EMPTY"}),
             ("LATE+PREV_75_PLUS", {"LATE", "PREV_75_PLUS"}),
             ("CONTACT_70_PLUS+CONV_80_PLUS", {"CONTACT_70_PLUS", "CONV_80_PLUS"}),
+            ("K_ENV_60_PLUS+BULLPEN_LOCK_55_PLUS", {"K_ENV_60_PLUS", "BULLPEN_LOCK_55_PLUS"}),
+            ("TRAFFIC_CONV_55_PLUS+HH_EFF_55_PLUS", {"TRAFFIC_CONV_55_PLUS", "HH_EFF_55_PLUS"}),
+            ("K_ENV_60_PLUS+HH_UNDER_55_PLUS", {"K_ENV_60_PLUS", "HH_UNDER_55_PLUS"}),
         ]
         tag_set = set(tag_list)
         for label, required in combos:
@@ -636,6 +816,359 @@ def build_learning_summary():
     return output
 
 
+
+
+def american_odds_profit_units(price, result):
+    """
+    Profit in units assuming 1 unit risked per strike.
+    -110 winner = +0.91u, +105 winner = +1.05u, loser = -1u.
+    """
+    result = str(result or "").upper()
+    if result == "PUSH":
+        return 0.0
+    if result != "WIN":
+        return -1.0
+    p = safe_int(price, 0)
+    if p == 0:
+        return 0.0
+    if p > 0:
+        return round(p / 100.0, 3)
+    return round(100.0 / abs(p), 3)
+
+
+def summarize_record(rows):
+    wins = sum(1 for r in rows if r.get("result") == "WIN")
+    losses = sum(1 for r in rows if r.get("result") == "LOSS")
+    pushes = sum(1 for r in rows if r.get("result") == "PUSH")
+    denom = max(1, wins + losses)
+    win_pct = round((wins / denom) * 100, 1)
+    units = round(sum(american_odds_profit_units(r.get("price"), r.get("result")) for r in rows), 2)
+    return wins, losses, pushes, win_pct, units
+
+
+
+def build_actionable_recommendations(graded_rows):
+    """
+    Turns the day's graded results into concrete next-day coaching notes.
+    These are directional, not automatic betting changes, until sample size grows.
+    """
+    if not ENABLE_ACTIONABLE_DAILY_RECOMMENDATIONS:
+        return []
+    if not graded_rows:
+        return []
+
+    notes = []
+    overs = [r for r in graded_rows if str(r.get("side", "")).upper() == "OVER"]
+    unders = [r for r in graded_rows if str(r.get("side", "")).upper() == "UNDER"]
+
+    def wl(rows):
+        return sum(1 for r in rows if r.get("result") == "WIN"), sum(1 for r in rows if r.get("result") == "LOSS")
+
+    late_over_losses = [r for r in overs if r.get("result") == "LOSS" and safe_int(r.get("inning"), 0) >= 7]
+    if len(late_over_losses) >= MIN_RECOMMENDATION_SAMPLE:
+        notes.append("Reduce late OVER aggression: multiple losses fired in inning 7+.")
+
+    extreme_losses = [r for r in graded_rows if r.get("result") == "LOSS" and safe_float(r.get("line"), 0) >= MAX_EXTREME_TOTAL_STRIKE_LINE]
+    if extreme_losses:
+        notes.append("Tighten extreme totals: require elite edge/confirmation for live totals 11.5+.")
+
+    under_k_bp = [r for r in unders if safe_int(r.get("k_env"), 0) >= 60 and safe_int(r.get("bullpen_lockdown"), 0) >= 55]
+    if len(under_k_bp) >= MIN_RECOMMENDATION_SAMPLE:
+        w, l = wl(under_k_bp)
+        if w > l:
+            notes.append(f"Boost UNDER profile: KEnv 60+ plus BPLock 55+ went {w}-{l} today.")
+        elif l > w:
+            notes.append(f"Review UNDER profile: KEnv+BPLock underperformed {w}-{l}; inspect screenshots before trusting it.")
+
+    over_traffic = [r for r in overs if safe_int(r.get("traffic_conversion"), 0) >= 55 and safe_int(r.get("hh_eff"), 0) >= 55]
+    if len(over_traffic) >= MIN_RECOMMENDATION_SAMPLE:
+        w, l = wl(over_traffic)
+        if w > l:
+            notes.append(f"Boost OVER profile: traffic conversion + hard-hit efficiency went {w}-{l} today.")
+        elif l > w:
+            notes.append(f"Caution OVER profile: traffic/contact did not convert today ({w}-{l}).")
+
+    high_risk_losses = [r for r in graded_rows if r.get("result") == "LOSS" and safe_int(r.get("risk_filter_score"), 0) >= 55]
+    if high_risk_losses:
+        notes.append("Risk filter worked as warning: high-risk losses appeared; consider requiring stronger value score.")
+
+    value_winners = [r for r in graded_rows if r.get("result") == "WIN" and safe_int(r.get("market_value_score"), 0) >= 70]
+    if len(value_winners) >= MIN_RECOMMENDATION_SAMPLE:
+        notes.append("Market value signal helped: prioritize strikes with Value 70+ tomorrow.")
+
+    if not notes:
+        notes.append("No strong adjustment from today alone; keep collecting graded strikes and screenshots.")
+    return notes[:5]
+
+
+def generate_daily_learning_report(report_date=None):
+    """
+    Creates a professional daily report from graded_results.csv, learning_summary.csv,
+    and clv_history.csv. This surfaces what the model learned instead of forcing
+    the user to interpret CSV files manually.
+    """
+    report_date = report_date or today()
+    graded = [
+        r for r in csv_read_rows(GRADED_RESULTS_FILE)
+        if r.get("date") == report_date and r.get("result") in ["WIN", "LOSS", "PUSH"]
+    ]
+
+    all_graded = [
+        r for r in csv_read_rows(GRADED_RESULTS_FILE)
+        if r.get("result") in ["WIN", "LOSS", "PUSH"]
+    ]
+
+    build_learning_summary()
+    summary_rows = csv_read_rows(LEARNING_SUMMARY_FILE)
+
+    lines = []
+    lines.append(f"📊 SHIFT MLB DAILY LEARNING REPORT")
+    lines.append(f"Date: {report_date}")
+    lines.append("")
+
+    if not graded:
+        lines.append("No graded STRIKE results found yet for today.")
+        lines.append("Check Railway logs for SELF-LEARNING STORED STRIKE and SELF-LEARNING GRADED.")
+        return "\n".join(lines)
+
+    w, l, p, pct, units = summarize_record(graded)
+    lines.append(f"Today: {w}-{l}-{p} | {pct}% | {units:+.2f}u")
+
+    over_rows = [r for r in graded if str(r.get("side", "")).upper() == "OVER"]
+    under_rows = [r for r in graded if str(r.get("side", "")).upper() == "UNDER"]
+    if over_rows:
+        ow, ol, op, opct, ounits = summarize_record(over_rows)
+        lines.append(f"OVER: {ow}-{ol}-{op} | {opct}% | {ounits:+.2f}u")
+    if under_rows:
+        uw, ul, up, upct, uunits = summarize_record(under_rows)
+        lines.append(f"UNDER: {uw}-{ul}-{up} | {upct}% | {uunits:+.2f}u")
+
+    if all_graded:
+        aw, al, ap, apct, aunits = summarize_record(all_graded)
+        lines.append(f"All-Time Stored: {aw}-{al}-{ap} | {apct}% | {aunits:+.2f}u")
+
+    clv_rows = [r for r in csv_read_rows(CLV_HISTORY_FILE) if r.get("date") == report_date]
+    if clv_rows:
+        beat = sum(1 for r in clv_rows if str(r.get("beat_market", "")).lower() == "true")
+        total = len(clv_rows)
+        avg_clv = round(avg([safe_float(r.get("clv"), 0) for r in clv_rows]), 2)
+        lines.append(f"CLV: beat market {beat}/{total} | Avg CLV {avg_clv:+.2f}")
+
+    lines.append("")
+    lines.append("Best Current Patterns:")
+    qualified = [r for r in summary_rows if safe_int(r.get("total"), 0) >= MIN_PATTERN_SAMPLE_FOR_REPORT]
+    strong = sorted(
+        [r for r in qualified if safe_float(r.get("win_pct"), 0) >= 60],
+        key=lambda r: (safe_float(r.get("win_pct"), 0), safe_int(r.get("total"), 0)),
+        reverse=True,
+    )[:5]
+    if strong:
+        for r in strong:
+            lines.append(f"✅ {r.get('side')} {r.get('pattern')}: {r.get('wins')}-{r.get('losses')}-{r.get('pushes')} ({r.get('win_pct')}%)")
+    else:
+        lines.append("Building sample — no strong pattern with enough volume yet.")
+
+    lines.append("")
+    lines.append("Caution Patterns:")
+    weak = sorted(
+        [r for r in qualified if safe_float(r.get("win_pct"), 100) <= 45],
+        key=lambda r: (safe_float(r.get("win_pct"), 100), -safe_int(r.get("total"), 0)),
+    )[:5]
+    if weak:
+        for r in weak:
+            lines.append(f"⚠️ {r.get('side')} {r.get('pattern')}: {r.get('wins')}-{r.get('losses')}-{r.get('pushes')} ({r.get('win_pct')}%)")
+    else:
+        lines.append("No clear caution pattern yet.")
+
+    lines.append("")
+    lines.append("Actionable Next-Day Notes:")
+    for note in build_actionable_recommendations(graded):
+        lines.append(f"• {note}")
+    lines.append("")
+    lines.append("Use one-day notes as coaching, not proof. Make threshold changes after repeat patterns show over 50+ graded strikes.")
+    post_tracking_event("daily_learning_report", {"date": report_date, "text": "\n".join(lines)})
+    return "\n".join(lines)
+
+
+def send_admin_text(msg):
+    """
+    Sends non-STRIKE administrative summaries such as the daily learning report.
+    This bypasses STRIKE-only SMS filtering intentionally.
+    """
+    print("\n" + msg + "\n")
+    if not SEND_DAILY_LEARNING_REPORT_SMS:
+        print("DAILY REPORT SMS NOT SENT: SMS disabled by SEND_DAILY_LEARNING_REPORT_SMS.")
+        return
+    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, ALERT_TO_NUMBER]):
+        print("DAILY REPORT SMS NOT SENT: Missing Twilio variables.")
+        return
+    try:
+        body = msg
+        if len(body) > MAX_SHORT_SMS_CHARS:
+            body = body[:MAX_SHORT_SMS_CHARS - 30].rstrip() + "\n[Trimmed]"
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        client.messages.create(body=body, from_=TWILIO_FROM_NUMBER, to=ALERT_TO_NUMBER)
+        print("DAILY REPORT TEXT SENT SUCCESSFULLY")
+    except Exception as e:
+        print("DAILY REPORT TEXT ERROR:", repr(e))
+
+
+
+def strongest_signal_pairs(row, limit=5):
+    """
+    Converts the model scores saved with the STRIKE into short, readable signal labels.
+    This is what the result text uses to explain why a strike won or lost.
+    """
+    candidates = [
+        ("Proj", safe_int(row.get("projection_score"), 0)),
+        ("Confirm", safe_int(row.get("confirmation_score"), 0)),
+        ("P2R", safe_int(row.get("p2r"), 0)),
+        ("Conv", safe_int(row.get("conv"), 0)),
+        ("Prev", safe_int(row.get("prev"), 0)),
+        ("Stress", safe_int(row.get("stress"), 0)),
+        ("Contact", safe_int(row.get("contact"), 0)),
+        ("KEnv", safe_int(row.get("k_env"), 0)),
+        ("BPLock", safe_int(row.get("bullpen_lockdown"), 0)),
+        ("TConv", safe_int(row.get("traffic_conversion"), 0)),
+        ("HHEff", safe_int(row.get("hh_eff"), 0)),
+        ("HHUnder", safe_int(row.get("hh_under"), 0)),
+        ("OverMaster", safe_int(row.get("over_pressure_score"), 0)),
+        ("UnderMaster", safe_int(row.get("under_suppression_score"), 0)),
+        ("Value", safe_int(row.get("market_value_score"), 0)),
+        ("Risk", safe_int(row.get("risk_filter_score"), 0)),
+        ("Threat", safe_int(row.get("threat_index"), 0)),
+        ("Stack", safe_int(row.get("signal_stack"), 0)),
+        ("Lag", safe_int(row.get("market_lag"), 0)),
+    ]
+    strong = [(name, val) for name, val in candidates if val > 0]
+    strong.sort(key=lambda x: x[1], reverse=True)
+    return strong[:limit]
+
+
+def build_result_learning_note(row):
+    """
+    Gives one plain-English improvement note after a strike is graded.
+    This is intentionally simple: it helps us refine day-to-day without pretending
+    one result is a statistically proven pattern.
+    """
+    side = str(row.get("side", "")).upper()
+    result = str(row.get("result", "")).upper()
+    line = safe_float(row.get("line"), 0)
+    inning = safe_int(row.get("inning"), 0)
+    k_env = safe_int(row.get("k_env"), 0)
+    bp = safe_int(row.get("bullpen_lockdown"), 0)
+    tconv = safe_int(row.get("traffic_conversion"), 0)
+    hheff = safe_int(row.get("hh_eff"), 0)
+    hhunder = safe_int(row.get("hh_under"), 0)
+    conv = safe_int(row.get("conv"), 0)
+    prev = safe_int(row.get("prev"), 0)
+    p2r = safe_int(row.get("p2r"), 0)
+
+    if result == "WIN":
+        if side == "UNDER" and (k_env >= 60 or bp >= 55 or hhunder >= 55 or prev >= 60):
+            return "Keep: UNDER profile supported by strikeouts/bullpen/run prevention."
+        if side == "OVER" and (tconv >= 55 or hheff >= 55 or conv >= 65 or p2r >= 70):
+            return "Keep: OVER profile supported by traffic/contact/run-conversion pressure."
+        return "Keep tracking: winner, but signal profile needs more sample."
+
+    if result == "LOSS":
+        if side == "OVER" and line >= MAX_EXTREME_TOTAL_STRIKE_LINE:
+            return "Caution: high live OVER total lost; require elite confirmation/edge next time."
+        if side == "UNDER" and line >= MAX_EXTREME_TOTAL_STRIKE_LINE:
+            return "Caution: high live UNDER total lost; check if market spike was justified."
+        if side == "OVER" and inning >= 7:
+            return "Caution: late OVER lost; reduce confidence unless traffic/contact is elite."
+        if side == "OVER" and tconv < 55 and hheff < 55:
+            return "Caution: OVER lost without strong traffic conversion or hard-hit efficiency."
+        if side == "UNDER" and k_env < 60 and bp < 55:
+            return "Caution: UNDER lost without strong K environment or bullpen lockdown."
+        return "Review: loser added to pattern database; wait for repeat signal before changing logic."
+
+    if result == "PUSH":
+        return "Neutral: push stored; useful for line-quality review."
+
+    return "Stored: result added to learning database."
+
+
+def build_graded_result_message(row, todays_rows):
+    """
+    Builds the immediate postgame result text. This is the missing user-facing loop:
+    STRIKE -> final score -> result -> today record -> one improvement note.
+    """
+    result = str(row.get("result", "UNKNOWN")).upper()
+    emoji = "✅" if result == "WIN" else "❌" if result == "LOSS" else "➖" if result == "PUSH" else "📌"
+    w, l, p, pct, units = summarize_record(todays_rows)
+
+    signals = strongest_signal_pairs(row, limit=5)
+    signal_text = " | ".join([f"{name} {val}" for name, val in signals]) if signals else "Signals unavailable"
+    tags = row.get("pattern_tags", "") or "No tags"
+    if len(tags) > 120:
+        tags = tags[:117] + "..."
+
+    msg = [
+        f"{emoji} SHIFT RESULT",
+        f"{row.get('game', 'Unknown Game')}",
+        f"Play: {row.get('side')} {row.get('line')} ({row.get('price') or 'price n/a'})",
+        f"Final: {row.get('final_score')} | Total {row.get('final_total')} | {result}",
+        f"Alert: {row.get('score')} | {row.get('inning_state')} {row.get('inning')} | {row.get('base_out')}",
+        f"Open/Live/Proj: {row.get('opening_total')}/{row.get('live_total')}/{row.get('projected_total')} | Edge {row.get('edge')}",
+        f"Signals: {signal_text}",
+        f"Master: OVER {row.get('over_pressure_score') or 0} | UNDER {row.get('under_suppression_score') or 0} | Value {row.get('market_value_score') or 0} | Risk {row.get('risk_filter_score') or 0}",
+        f"Today: {w}-{l}-{p} | {pct}% | {units:+.2f}u",
+        build_result_learning_note(row),
+    ]
+    return "\n".join(msg)
+
+
+def send_graded_result_text(msg):
+    """
+    Sends immediate graded result SMS. Keeps logging even if SMS is disabled/misconfigured.
+    """
+    if ENABLE_GRADED_RESULT_LOG:
+        print("\n" + msg + "\n")
+
+    if not ENABLE_GRADED_RESULT_SMS:
+        print("GRADED RESULT SMS NOT SENT: disabled by ENABLE_GRADED_RESULT_SMS.")
+        return
+
+    if not all([TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, ALERT_TO_NUMBER]):
+        print("GRADED RESULT SMS NOT SENT: Missing Twilio variables.")
+        return
+
+    body = msg
+    if len(body) > MAX_RESULT_SMS_CHARS:
+        body = body[:MAX_RESULT_SMS_CHARS - 30].rstrip() + "\n[Trimmed]"
+
+    try:
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        client.messages.create(body=body, from_=TWILIO_FROM_NUMBER, to=ALERT_TO_NUMBER)
+        print("GRADED RESULT TEXT SENT SUCCESSFULLY")
+    except Exception as e:
+        print("GRADED RESULT TEXT ERROR:", repr(e))
+
+
+def maybe_send_daily_learning_report(state, any_live):
+    """
+    Sends/prints one learning report per day after the configured hour once no games are live.
+    Default: 10 PM Arizona time. State resets daily with load_state().
+    """
+    if not ENABLE_DAILY_LEARNING_REPORT:
+        return
+    if any_live:
+        return
+    if now_local().hour < DAILY_LEARNING_REPORT_HOUR:
+        return
+
+    sent_key = "daily_learning_report_sent_for"
+    if state.get(sent_key) == today():
+        return
+
+    report = generate_daily_learning_report(today())
+    print("DAILY LEARNING REPORT GENERATED")
+    send_admin_text(report)
+    state[sent_key] = today()
+    save_state(state)
+
 def historical_pattern_note(info, opportunity):
     """
     Reads our own graded history and returns a short note for the alert.
@@ -660,6 +1193,11 @@ def historical_pattern_note(info, opportunity):
         "threat_index": scores.get("threat_index"),
         "signal_stack": scores.get("signal_stack"),
         "market_lag": scores.get("market_lag"),
+        "k_env": scores.get("strikeout_environment"),
+        "bullpen_lockdown": scores.get("bullpen_lockdown"),
+        "traffic_conversion": scores.get("traffic_conversion"),
+        "hh_eff": scores.get("hard_hit_efficiency"),
+        "hh_under": scores.get("hard_hit_under_support"),
     }
 
     tags = set(pattern_tags_from_row(row))
@@ -774,6 +1312,15 @@ def grade_completed_strikes(game_pk, label, final_score):
             f"New grades W-L-P: {wins}-{losses}-{pushes} | "
             f"Summary patterns: {len(summary)}"
         )
+
+        # V2.4.1: immediately tell the user how each completed STRIKE played out.
+        todays_rows = [
+            r for r in existing
+            if r.get("date") == today() and r.get("result") in ["WIN", "LOSS", "PUSH"]
+        ]
+        for row in newly_graded:
+            post_tracking_event("strike_graded", row)
+            send_graded_result_text(build_graded_result_message(row, todays_rows))
 
 def time_remaining_multiplier(info):
     """
@@ -916,6 +1463,15 @@ def log_strike_history(info, opportunity, market_context=None):
         "signal_stack": scores.get("signal_stack"),
         "market_lag": scores.get("market_lag"),
         "conv_acceleration": scores.get("conv_acceleration"),
+        "k_env": scores.get("strikeout_environment"),
+        "bullpen_lockdown": scores.get("bullpen_lockdown"),
+        "traffic_conversion": scores.get("traffic_conversion"),
+        "hh_eff": scores.get("hard_hit_efficiency"),
+        "hh_under": scores.get("hard_hit_under_support"),
+        "over_pressure_score": master_score_from_scores("OVER", scores),
+        "under_suppression_score": master_score_from_scores("UNDER", scores),
+        "market_value_score": master_market_value_score(opportunity, scores),
+        "risk_filter_score": master_risk_filter_score(opportunity, info, scores),
         "scenario": opportunity.get("scenario"),
         "action": opportunity.get("action"),
         "final_score": "",
@@ -926,6 +1482,7 @@ def log_strike_history(info, opportunity, market_context=None):
     row["pattern_tags"] = "|".join(pattern_tags_from_row(row))
 
     csv_append_once(STRIKE_HISTORY_FILE, strike_fieldnames(), row)
+    post_tracking_event("strike_stored", row)
     print(f"SELF-LEARNING STORED STRIKE | {row['game']} | {row['side']} {row['line']} | {row['pattern_tags']}")
 
 
@@ -971,6 +1528,79 @@ def log_clv_snapshot(info, opportunity, current_live_total):
     }
 
     csv_append_once(CLV_HISTORY_FILE, fieldnames, row)
+    post_tracking_event("clv_snapshot", row)
+
+
+
+def update_active_clv_snapshots(info, live_total):
+    """
+    V2.4.2 real CLV tracking.
+    On every normal odds poll, compare the current live total to any stored STRIKE line
+    for this game. This creates a true line-movement trail instead of only a same-moment snapshot.
+    No extra Odds API calls; it uses the live_total already fetched in the main loop.
+    """
+    if not ENABLE_CLV_TRACKING or not ENABLE_CLV_POLL_SNAPSHOTS:
+        return
+    current_line = safe_float(live_total, None)
+    if current_line is None:
+        return
+
+    rows = csv_read_rows(STRIKE_HISTORY_FILE)
+    if not rows:
+        return
+
+    state_key = "_last_clv_line"
+    changed = False
+    for row in rows:
+        if row.get("date") != today():
+            continue
+        if row.get("action") != "STRIKE":
+            continue
+        if row.get("result") in ["WIN", "LOSS", "PUSH"]:
+            continue
+        if not (row.get("game_pk") == str(info.get("game_pk")) or row.get("game") == f"{info.get('away')} at {info.get('home')}"):
+            continue
+
+        alert_line = safe_float(row.get("line"), None)
+        if alert_line is None:
+            continue
+        last_logged = safe_float(row.get(state_key), None)
+        if last_logged is not None and abs(current_line - last_logged) < CLV_SNAPSHOT_MIN_MOVE:
+            continue
+
+        side = str(row.get("side", "")).upper()
+        if side == "OVER":
+            clv = round(current_line - alert_line, 1)
+            beat_market = clv > 0
+        elif side == "UNDER":
+            clv = round(alert_line - current_line, 1)
+            beat_market = clv > 0
+        else:
+            continue
+
+        snap = {
+            "timestamp": now_local().isoformat(),
+            "date": today(),
+            "game": row.get("game"),
+            "strike_id": row.get("strike_id"),
+            "side": side,
+            "alert_line": alert_line,
+            "current_line": current_line,
+            "clv": clv,
+            "beat_market": beat_market,
+            "inning": info.get("inning"),
+            "score": f"{info.get('away_runs')}-{info.get('home_runs')}",
+            "snapshot_type": "poll_update",
+        }
+        csv_append_once(CLV_HISTORY_FILE, list(snap.keys()), snap)
+        post_tracking_event("clv_poll_snapshot", snap)
+        row[state_key] = current_line
+        changed = True
+
+    if changed:
+        # Preserve unknown internal key by writing only known strike fields would drop it,
+        # so intentionally do not rewrite strike_history here. CLV snapshots are enough.
+        pass
 
 
 def load_state():
@@ -1143,6 +1773,10 @@ def compact_strike_sms(msg):
     threat = extract_alert_value(msg, "Threat")
     stack = extract_alert_value(msg, "Stack")
     lag = extract_alert_value(msg, "Lag")
+    k_env = extract_alert_value(msg, "KEnv")
+    bp_lock = extract_alert_value(msg, "BPLock")
+    tconv = extract_alert_value(msg, "TConv")
+    hheff = extract_alert_value(msg, "HHEff")
 
     # Elite label
     try:
@@ -1207,6 +1841,14 @@ def compact_strike_sms(msg):
         reason_bits.append(f"Stack {stack}")
     if lag:
         reason_bits.append(f"Lag {lag}")
+    if k_env:
+        reason_bits.append(f"KEnv {k_env}")
+    if bp_lock:
+        reason_bits.append(f"BPLock {bp_lock}")
+    if tconv:
+        reason_bits.append(f"TConv {tconv}")
+    if hheff:
+        reason_bits.append(f"HHEff {hheff}")
 
     if reason_bits:
         compact.extend(["", "Signals: " + " | ".join(reason_bits[:4])])
@@ -2318,6 +2960,319 @@ def blowout_kill_score(info):
     return round(clamp(score))
 
 
+
+def pitcher_team_side(feed, pitcher_id):
+    """Return 'home' or 'away' for the current pitcher using the live boxscore."""
+    if not pitcher_id:
+        return None
+    pid = f"ID{pitcher_id}"
+    box = feed.get("liveData", {}).get("boxscore", {})
+    for side in ["home", "away"]:
+        players = box.get("teams", {}).get(side, {}).get("players", {})
+        if pid in players:
+            return side
+    return None
+
+
+def team_pitching_summary(feed, side):
+    """
+    Current-game pitching summary for one team. Uses the MLB live feed only.
+    This is not a season bullpen rating; it tells us whether the current game is
+    becoming a strikeout/lockdown environment.
+    """
+    empty = {
+        "pitchers_used": 0,
+        "bullpen_pitchers_used": 0,
+        "outs": 0,
+        "bullpen_outs": 0,
+        "runs": 0,
+        "hits": 0,
+        "walks": 0,
+        "strikeouts": 0,
+        "bullpen_runs": 0,
+        "bullpen_hits": 0,
+        "bullpen_walks": 0,
+        "bullpen_strikeouts": 0,
+    }
+    if side not in ["home", "away"]:
+        return empty
+
+    team = feed.get("liveData", {}).get("boxscore", {}).get("teams", {}).get(side, {})
+    players = team.get("players", {}) or {}
+    pitcher_ids = team.get("pitchers", []) or []
+    starter_id = pitcher_ids[0] if pitcher_ids else None
+
+    out = dict(empty)
+    for raw_id in pitcher_ids:
+        pdata = players.get(f"ID{raw_id}", {})
+        stats = pdata.get("stats", {}).get("pitching", {}) or {}
+        if not stats:
+            continue
+        innings_raw = str(stats.get("inningsPitched", "0"))
+        outs = int(math.floor(safe_float(innings_raw.replace(".1", ".33").replace(".2", ".67"), 0))) * 3
+        if ".1" in innings_raw:
+            outs += 1
+        elif ".2" in innings_raw:
+            outs += 2
+
+        runs = safe_int(stats.get("runs"), 0)
+        hits = safe_int(stats.get("hits"), 0)
+        walks = safe_int(stats.get("baseOnBalls"), 0)
+        strikeouts = safe_int(stats.get("strikeOuts"), 0)
+
+        out["pitchers_used"] += 1
+        out["outs"] += outs
+        out["runs"] += runs
+        out["hits"] += hits
+        out["walks"] += walks
+        out["strikeouts"] += strikeouts
+
+        if raw_id != starter_id:
+            out["bullpen_pitchers_used"] += 1
+            out["bullpen_outs"] += outs
+            out["bullpen_runs"] += runs
+            out["bullpen_hits"] += hits
+            out["bullpen_walks"] += walks
+            out["bullpen_strikeouts"] += strikeouts
+
+    return out
+
+
+def game_pitching_context(feed, info):
+    """Combined current-game pitching context from both boxscores."""
+    home = team_pitching_summary(feed, "home")
+    away = team_pitching_summary(feed, "away")
+    cur_side = pitcher_team_side(feed, info.get("pitcher_id"))
+    cur_team = team_pitching_summary(feed, cur_side) if cur_side else {}
+    return {"home": home, "away": away, "current_pitcher_team": cur_team, "current_pitcher_side": cur_side}
+
+
+def strikeout_environment_score(info, p, q, traffic, pitching_context=None):
+    """
+    Measures whether the game is suppressing runs through strikeouts/whiffs.
+    High score supports UNDER and warns against weak OVERs.
+    """
+    score = 0
+    outs_recorded = max(1, safe_int(p.get("outs_recorded"), 0))
+    k = safe_int(p.get("strikeouts"), 0)
+    k_per_out = k / outs_recorded
+
+    if k_per_out >= 0.55 and outs_recorded >= 6:
+        score += 26
+    elif k_per_out >= 0.42 and outs_recorded >= 6:
+        score += 18
+    elif k_per_out >= 0.30:
+        score += 10
+
+    if q.get("whiff_pct", 0) >= 34:
+        score += 18
+    elif q.get("whiff_pct", 0) >= 28:
+        score += 10
+
+    if q.get("csw_pct", 0) >= 31:
+        score += 14
+    elif q.get("csw_pct", 0) >= 28:
+        score += 8
+
+    if traffic.get("recent_strikeouts", 0) >= 3:
+        score += 12
+    elif traffic.get("recent_strikeouts", 0) >= 2:
+        score += 7
+
+    ctx = pitching_context or {}
+    total_k = 0
+    total_outs = 0
+    for side in ["home", "away"]:
+        node = ctx.get(side, {}) or {}
+        total_k += safe_int(node.get("strikeouts"), 0)
+        total_outs += safe_int(node.get("outs"), 0)
+
+    if total_outs >= 18:
+        game_k_rate = total_k / max(1, total_outs)
+        if game_k_rate >= 0.42:
+            score += 20
+        elif game_k_rate >= 0.32:
+            score += 12
+
+    return round(clamp(score))
+
+
+def bullpen_lockdown_score(info, p, q, pitching_context=None):
+    """
+    Measures whether late-inning run suppression is likely from the bullpen profile
+    that is actually appearing in the game. High score supports UNDER and pushes
+    against late OVERs.
+    """
+    ctx = pitching_context or {}
+    cur = ctx.get("current_pitcher_team", {}) or {}
+    inning = safe_int(info.get("inning", 1), 1)
+    score = 0
+
+    bp_outs = safe_int(cur.get("bullpen_outs"), 0)
+    bp_k = safe_int(cur.get("bullpen_strikeouts"), 0)
+    bp_hits = safe_int(cur.get("bullpen_hits"), 0)
+    bp_walks = safe_int(cur.get("bullpen_walks"), 0)
+    bp_runs = safe_int(cur.get("bullpen_runs"), 0)
+
+    if bp_outs >= 3:
+        bp_k_rate = bp_k / max(1, bp_outs)
+        traffic_allowed = bp_hits + bp_walks
+        if bp_k_rate >= 0.45:
+            score += 25
+        elif bp_k_rate >= 0.30:
+            score += 15
+        if traffic_allowed == 0:
+            score += 18
+        elif traffic_allowed <= 1:
+            score += 10
+        if bp_runs == 0:
+            score += 12
+        else:
+            score -= min(20, bp_runs * 10)
+    else:
+        # Pre-bullpen estimate: a dominant starter + later inning means the next arms
+        # may only need a short bridge. This is a modest score, not a hard assumption.
+        if inning >= 6 and p.get("pitch_count", 0) <= 85 and q.get("whiff_pct", 0) >= 28:
+            score += 15
+        elif inning >= 6:
+            score += 6
+
+    if inning >= 7:
+        score += 8
+    if q.get("whiff_pct", 0) >= 34 and q.get("max_ev", 120) < 95:
+        score += 10
+    if q.get("avg_ev", 100) and q.get("avg_ev", 100) < 86 and q.get("balls_in_play", 0) >= 4:
+        score += 8
+
+    return round(clamp(score))
+
+
+def traffic_conversion_score(info, p, q, traffic):
+    """
+    OVER regression score: baserunners/contact without enough runs yet.
+    High score says pressure may convert soon. Low score does not automatically mean UNDER.
+    """
+    baserunners = safe_int(p.get("hits"), 0) + safe_int(p.get("walks"), 0) + safe_int(p.get("hbp"), 0)
+    runs = safe_int(p.get("runs"), 0)
+    score = 0
+
+    stranded_like = baserunners - runs
+    if baserunners >= 7 and stranded_like >= 5:
+        score += 30
+    elif baserunners >= 5 and stranded_like >= 3:
+        score += 22
+    elif baserunners >= 3 and stranded_like >= 2:
+        score += 12
+
+    if traffic.get("recent_baserunners", 0) >= 4:
+        score += 18
+    elif traffic.get("recent_baserunners", 0) >= 3:
+        score += 10
+
+    if traffic.get("consecutive_baserunners", 0) >= 3:
+        score += 16
+    elif traffic.get("consecutive_baserunners", 0) >= 2:
+        score += 8
+
+    if q.get("barrels", 0) >= 2 and runs <= 2:
+        score += 14
+    elif q.get("barrels", 0) >= 1 and runs <= 1:
+        score += 8
+
+    # Strikeout-heavy environments suppress traffic conversion.
+    if q.get("whiff_pct", 0) >= 34 and traffic.get("recent_strikeouts", 0) >= 2:
+        score -= 14
+
+    return round(clamp(score))
+
+
+def hard_hit_efficiency_score(info, p, q, traffic):
+    """
+    Measures whether hard contact is actually becoming hits/traffic.
+    Positive = OVER pressure from hard contact not fully paid off yet.
+    Negative values are not returned; UNDER support is handled by hard_hit_under_support_score.
+    """
+    hard = safe_int(q.get("hard_hit"), 0)
+    bip = safe_int(q.get("balls_in_play"), 0)
+    hits = safe_int(p.get("hits"), 0)
+    barrels = safe_int(q.get("barrels"), 0)
+    score = 0
+
+    if bip >= 6 and hard >= 4 and hits <= 2:
+        score += 28
+    elif bip >= 5 and hard >= 3 and hits <= 2:
+        score += 18
+    elif hard >= 2 and hits <= 1:
+        score += 10
+
+    if barrels >= 2 and hits <= 3:
+        score += 18
+    elif barrels >= 1 and hits <= 2:
+        score += 8
+
+    if q.get("avg_ev", 0) >= 91 and hits <= 3:
+        score += 10
+    if q.get("ev_trend", 0) >= 5:
+        score += 8
+
+    # If strikeouts are killing traffic, reduce the regression pressure.
+    if q.get("whiff_pct", 0) >= 34:
+        score -= 8
+
+    return round(clamp(score))
+
+
+def hard_hit_under_support_score(info, p, q, traffic):
+    """
+    UNDER support from weak or inefficient contact plus limited baserunners.
+    This is the lesson from Mets/Mariners: hard-hit rate alone is not enough.
+    """
+    hits = safe_int(p.get("hits"), 0)
+    walks = safe_int(p.get("walks"), 0)
+    bip = safe_int(q.get("balls_in_play"), 0)
+    hard = safe_int(q.get("hard_hit"), 0)
+    score = 0
+
+    if hits + walks <= 2 and bip >= 6:
+        score += 18
+    elif hits + walks <= 3:
+        score += 10
+
+    if q.get("avg_ev", 100) < 86 and bip >= 5:
+        score += 18
+    elif q.get("avg_ev", 100) < 88 and bip >= 4:
+        score += 10
+
+    if hard <= 1 and bip >= 5:
+        score += 16
+    elif hard <= 2 and bip >= 6:
+        score += 8
+
+    if q.get("whiff_pct", 0) >= 30 and hits <= 3:
+        score += 12
+
+    return round(clamp(score))
+
+
+def extreme_total_risk(side, line, edge, scores):
+    """
+    Prevents low-quality strikes at extreme totals like OVER 11.5 / UNDER 12.5
+    unless the projection, confirmation, and edge are all elite.
+    """
+    line = safe_float(line, None)
+    if line is None or line < MAX_EXTREME_TOTAL_STRIKE_LINE:
+        return False, "normal total"
+
+    projection = safe_int(scores.get("projection_score"), 0)
+    confirmation = safe_int(scores.get("confirmation_score"), 0)
+    strong_edge = abs(safe_float(edge, 0)) >= MIN_EXTREME_TOTAL_EDGE
+    elite_scores = projection >= MIN_EXTREME_TOTAL_PROJECTION and confirmation >= MIN_EXTREME_TOTAL_CONFIRMATION
+
+    if strong_edge and elite_scores:
+        return False, "extreme total allowed by elite confirmation"
+    return True, "extreme total suppressed"
+
+
 def under_environment_score(info, p, q, traffic, dominance, contact, current_pressure, remaining_opp, fake_pressure, blowout):
     """
     Builds real UNDER paths instead of only allowing UNDER through raw projected edge.
@@ -2357,7 +3312,7 @@ def under_environment_score(info, p, q, traffic, dominance, contact, current_pre
 
 
 
-def run_conversion_score(info, p, q, traffic, hitters, current_pressure, remaining_opp, stress, contact, lineup, contact_trend, tto, starter_exit, fake_pressure):
+def run_conversion_score(info, p, q, traffic, hitters, current_pressure, remaining_opp, stress, contact, lineup, contact_trend, tto, starter_exit, fake_pressure, traffic_conversion=0, hard_hit_efficiency=0, strikeout_environment=0, bullpen_lockdown=0):
     """
     OVER quality score: pressure must be likely to become actual runs.
     This prevents the bot from betting every traffic situation.
@@ -2437,6 +3392,12 @@ def run_conversion_score(info, p, q, traffic, hitters, current_pressure, remaini
     elif q.get("whiff_pct", 0) >= 28 and q.get("csw_pct", 0) >= 29:
         score -= 8
 
+    # V2.4: pressure must be able to become runs.
+    score += traffic_conversion * 0.18
+    score += hard_hit_efficiency * 0.14
+    score -= strikeout_environment * 0.12
+    score -= bullpen_lockdown * 0.10
+
     score -= fake_pressure * 0.22
 
     # Two outs makes conversion harder unless there is elite contact/command collapse.
@@ -2446,7 +3407,7 @@ def run_conversion_score(info, p, q, traffic, hitters, current_pressure, remaini
     return round(clamp(score))
 
 
-def run_prevention_score(info, p, q, traffic, dominance, contact, current_pressure, remaining_opp, fake_pressure, under_environment, blowout):
+def run_prevention_score(info, p, q, traffic, dominance, contact, current_pressure, remaining_opp, fake_pressure, under_environment, blowout, strikeout_environment=0, bullpen_lockdown=0, hard_hit_under_support=0, traffic_conversion=0, hard_hit_efficiency=0):
     """
     UNDER quality score: low scoring must be likely to continue.
     """
@@ -2486,6 +3447,11 @@ def run_prevention_score(info, p, q, traffic, dominance, contact, current_pressu
     score += fake_pressure * 0.20
     score += under_environment * 0.25
     score += blowout * 0.12
+    score += strikeout_environment * 0.18
+    score += bullpen_lockdown * 0.16
+    score += hard_hit_under_support * 0.12
+    score -= traffic_conversion * 0.10
+    score -= hard_hit_efficiency * 0.08
 
     # Under danger penalties.
     if current_pressure >= 60:
@@ -2870,6 +3836,8 @@ def signal_stack_score(side, scores):
             ("MarketLag", scores.get("market_lag", 0) >= 60),
             ("PreOver", scores.get("pre_run_over_watch", 0) >= 72),
             ("PredMove", scores.get("predictive_market_move", 0) >= 65),
+            ("TrafficConv", scores.get("traffic_conversion", 0) >= 60),
+            ("HHEff", scores.get("hard_hit_efficiency", 0) >= 55),
         ]
     else:
         checks = [
@@ -2880,6 +3848,9 @@ def signal_stack_score(side, scores):
             ("MarketLag", scores.get("market_lag", 0) >= 60),
             ("NoP2R", scores.get("pressure_to_runs", 0) <= 25),
             ("Dominance", scores.get("pitcher_dominance", 0) >= 55),
+            ("KEnv", scores.get("strikeout_environment", 0) >= 60),
+            ("BullpenLock", scores.get("bullpen_lockdown", 0) >= 55),
+            ("HHUnder", scores.get("hard_hit_under_support", 0) >= 55),
         ]
 
     for label, ok in checks:
@@ -3016,6 +3987,10 @@ def confirmation_score(side, info, scores):
             + scores.get("contact_quality", 0) * 0.15
             + scores.get("pitcher_stress", 0) * 0.10
             + scores.get("lineup_pressure", 0) * 0.05
+            + scores.get("traffic_conversion", 0) * 0.08
+            + scores.get("hard_hit_efficiency", 0) * 0.06
+            - scores.get("strikeout_environment", 0) * 0.08
+            - scores.get("bullpen_lockdown", 0) * 0.07
         )
 
         # Late overs need stronger current or near-current evidence.
@@ -3052,6 +4027,11 @@ def confirmation_score(side, info, scores):
             + max(0, 100 - scores.get("contact_quality", 0)) * 0.10
             + max(0, 100 - scores.get("pressure_to_runs", 0)) * 0.10
             + max(0, -scores.get("predictive_market_move", 0)) * 0.05
+            + scores.get("strikeout_environment", 0) * 0.12
+            + scores.get("bullpen_lockdown", 0) * 0.10
+            + scores.get("hard_hit_under_support", 0) * 0.08
+            - scores.get("traffic_conversion", 0) * 0.08
+            - scores.get("hard_hit_efficiency", 0) * 0.06
         )
 
         if inning >= 7:
@@ -3182,16 +4162,23 @@ def confidence_score(side, edge, scenario, scores, evidence, market_resistance):
         confidence += scores.get("pressure_to_runs", 0) * 0.12
         confidence += scores.get("pre_run_over_watch", 0) * 0.10
         confidence += scores.get("over_value", 0) * 0.05
+        confidence += scores.get("traffic_conversion", 0) * 0.08
+        confidence += scores.get("hard_hit_efficiency", 0) * 0.06
         confidence += max(0, scores.get("predictive_market_move", 0)) * 0.10
         confidence += max(0, market_resistance) * 0.12
         confidence -= scores.get("fake_pressure", 0) * 0.16
         confidence -= scores.get("run_prevention", 0) * 0.06
         confidence -= scores.get("under_environment", 0) * 0.10
+        confidence -= scores.get("strikeout_environment", 0) * 0.07
+        confidence -= scores.get("bullpen_lockdown", 0) * 0.06
         confidence -= scores.get("blowout_kill", 0) * 0.12
     else:
         confidence += scores.get("dominance", 0) * 0.09
         confidence += scores.get("under_environment", 0) * 0.12
         confidence += scores.get("run_prevention", 0) * 0.14
+        confidence += scores.get("strikeout_environment", 0) * 0.10
+        confidence += scores.get("bullpen_lockdown", 0) * 0.09
+        confidence += scores.get("hard_hit_under_support", 0) * 0.07
         confidence += scores.get("fake_pressure", 0) * 0.10
         confidence += max(0, -market_resistance) * 0.12
         confidence += max(0, -scores.get("predictive_market_move", 0)) * 0.08
@@ -3199,6 +4186,8 @@ def confidence_score(side, edge, scenario, scores, evidence, market_resistance):
         confidence -= scores.get("run_conversion", 0) * 0.06
         confidence -= scores.get("contact_quality", 0) * 0.08
         confidence -= scores.get("pitcher_stress", 0) * 0.06
+        confidence -= scores.get("traffic_conversion", 0) * 0.08
+        confidence -= scores.get("hard_hit_efficiency", 0) * 0.06
 
     if "Watch" in scenario:
         confidence -= 4
@@ -3218,6 +4207,8 @@ def action_from_confidence(side, confidence, edge, scores=None):
     projection = scores.get("projection_score", confidence)
     confirmation = scores.get("confirmation_score", confidence)
 
+    extreme_blocked, _extreme_reason = extreme_total_risk(side, scores.get("live_total", 0), edge, scores)
+
     if side == "OVER":
         min_edge = MIN_LATE_OVER_STRIKE_EDGE_RUNS if inning >= 7 else MIN_OVER_EDGE_RUNS
         min_confirm = MIN_LATE_OVER_CONFIRMATION_FOR_STRIKE if inning >= 7 else MIN_OVER_CONFIRMATION_FOR_STRIKE
@@ -3229,7 +4220,7 @@ def action_from_confidence(side, confidence, edge, scores=None):
             and scores.get("pressure_to_runs", 0) >= (70 if inning >= 7 else 60)
             and scores.get("run_conversion", 0) >= (62 if inning >= 7 else 55)
         )
-        if strike_ready:
+        if strike_ready and not extreme_blocked:
             return "STRIKE"
 
         watch_ready = (
@@ -3254,8 +4245,13 @@ def action_from_confidence(side, confidence, edge, scores=None):
         and scores.get("run_prevention", 0) >= 75
         and scores.get("current_inning_pressure", 0) <= 30
         and scores.get("contact_quality", 0) <= 40
+        and (
+            scores.get("strikeout_environment", 0) >= MIN_K_ENV_UNDER_STRIKE
+            or scores.get("bullpen_lockdown", 0) >= MIN_BULLPEN_LOCKDOWN_UNDER_STRIKE
+            or inning <= 4
+        )
     )
-    if strike_ready:
+    if strike_ready and not extreme_blocked:
         return "STRIKE"
 
     watch_ready = (
@@ -3302,6 +4298,11 @@ def expected_future_runs(
     predictive_market_move=0,
     pressure_to_runs=0,
     pre_run_over_watch=0,
+    strikeout_environment=0,
+    bullpen_lockdown=0,
+    traffic_conversion=0,
+    hard_hit_efficiency=0,
+    hard_hit_under_support=0,
 ):
     innings_left = innings_remaining_estimate(info)
     base_rate = innings_left * 0.95
@@ -3325,6 +4326,8 @@ def expected_future_runs(
     upward += (pressure_to_runs / 100) * 0.75
     upward += (pre_run_over_watch / 100) * 0.55
     upward += (max(0, predictive_market_move) / 100) * 0.45
+    upward += (traffic_conversion / 100) * 0.55
+    upward += (hard_hit_efficiency / 100) * 0.45
 
     downward += (dominance / 100) * 1.20
     downward += (fake_pressure / 100) * 0.75
@@ -3333,6 +4336,9 @@ def expected_future_runs(
     downward += (run_prevention / 100) * 0.90
     downward += (max(0, -market_resistance) / 100) * 0.60
     downward += (max(0, -predictive_market_move) / 100) * 0.35
+    downward += (strikeout_environment / 100) * 0.75
+    downward += (bullpen_lockdown / 100) * 0.65
+    downward += (hard_hit_under_support / 100) * 0.45
     downward += max(0, 70 - current_pressure) * 0.007 if current_pressure < 40 else 0
     downward += max(0, 65 - remaining_opp) * 0.006 if remaining_opp < 45 else 0
 
@@ -3363,6 +4369,11 @@ def classify_scenario(
     market_resistance=0,
     blowout_kill=0,
     under_environment=0,
+    strikeout_environment=0,
+    bullpen_lockdown=0,
+    traffic_conversion=0,
+    hard_hit_efficiency=0,
+    hard_hit_under_support=0,
 ):
     mp = market_pressure(opening, live)
     total_runs = info["total_runs"]
@@ -3377,6 +4388,16 @@ def classify_scenario(
 
     if fake_pressure >= 50 and under_environment >= 55:
         return "Predictive Market Move → Under Watch"
+
+    # V2.4 pro refinement paths from reviewed winners/losers.
+    if strikeout_environment >= 70 and bullpen_lockdown >= 55 and current_pressure <= 35:
+        return "Strikeout + Bullpen Lockdown → Under Opportunity"
+
+    if traffic_conversion >= 65 and hard_hit_efficiency >= 55 and strikeout_environment < 60 and bullpen_lockdown < 55:
+        return "Traffic Not Converted + Hard Contact → Over Opportunity"
+
+    if hard_hit_under_support >= 65 and strikeout_environment >= 60 and current_pressure <= 35:
+        return "Weak Contact + Strikeouts → Under Watch"
 
     # True UNDER paths first. This fixes the prior over-only behavior.
     if mp["direction"] == "inflated" and total_runs >= 3 and under_environment >= 55 and current_pressure <= 40:
@@ -3924,7 +4945,7 @@ def format_alert(label, start_label, info, market_context, opportunity, p, q, tr
     history_note = historical_pattern_note(info, opportunity)
 
     return (
-        f"SHIFT MLB V2.3.3 SELF-LEARNING TRACKER {action}\n\n"
+        f"SHIFT MLB V2.4.0 PRO CONTACT/BULLPEN LEARNING {action}\n\n"
         f"{label}\n"
         f"Start: {start_label}\n\n"
         f"Instruction:\n"
@@ -4109,6 +5130,7 @@ def main():
 
                 markets = find_markets(odds, info["home"], info["away"])
                 live_total = markets["total"]["point"]
+                update_active_clv_snapshots(info, live_total)
 
                 if state_game["opening_total"] is None and live_total:
                     state_game["opening_total"] = live_total
@@ -4124,6 +5146,12 @@ def main():
                 stress = pitcher_stress_score(p, q, traffic)
                 dominance = pitcher_dominance_score(p, q, traffic)
                 contact = contact_quality_score(q, traffic)
+                pitching_context = game_pitching_context(feed, info)
+                strikeout_env = strikeout_environment_score(info, p, q, traffic, pitching_context)
+                bullpen_lockdown = bullpen_lockdown_score(info, p, q, pitching_context)
+                traffic_conversion_pressure = traffic_conversion_score(info, p, q, traffic)
+                hard_hit_efficiency = hard_hit_efficiency_score(info, p, q, traffic)
+                hard_hit_under_support = hard_hit_under_support_score(info, p, q, traffic)
                 bullpen = bullpen_risk_score(info, p)
                 remaining_opp = remaining_opportunity_score(info, lineup_pressure, bullpen)
                 current_pressure = current_inning_pressure_score(info, lineup_pressure, stress, contact)
@@ -4137,8 +5165,8 @@ def main():
                 market_res = market_resistance_score(opening_total, live_total, info, current_pressure, contact, dominance)
                 blowout = blowout_kill_score(info)
                 under_env = under_environment_score(info, p, q, traffic, dominance, contact, current_pressure, remaining_opp, fake_pressure, blowout)
-                run_conversion = run_conversion_score(info, p, q, traffic, hitters, current_pressure, remaining_opp, stress, contact, lineup_pressure, contact_trend, tto, starter_exit, fake_pressure)
-                run_prevention = run_prevention_score(info, p, q, traffic, dominance, contact, current_pressure, remaining_opp, fake_pressure, under_env, blowout)
+                run_conversion = run_conversion_score(info, p, q, traffic, hitters, current_pressure, remaining_opp, stress, contact, lineup_pressure, contact_trend, tto, starter_exit, fake_pressure, traffic_conversion_pressure, hard_hit_efficiency, strikeout_env, bullpen_lockdown)
+                run_prevention = run_prevention_score(info, p, q, traffic, dominance, contact, current_pressure, remaining_opp, fake_pressure, under_env, blowout, strikeout_env, bullpen_lockdown, hard_hit_under_support, traffic_conversion_pressure, hard_hit_efficiency)
 
                 # Temporary score dict for over predictive calculation.
                 # IMPORTANT: initialize these BEFORE using them in dictionaries.
@@ -4168,6 +5196,11 @@ def main():
                     "pre_run_over_watch": 0,
                     "over_value": 0,
                     "predictive_market_move": 0,
+                    "strikeout_environment": strikeout_env,
+                    "bullpen_lockdown": bullpen_lockdown,
+                    "traffic_conversion": traffic_conversion_pressure,
+                    "hard_hit_efficiency": hard_hit_efficiency,
+                    "hard_hit_under_support": hard_hit_under_support,
                 }
                 pressure_to_runs = pressure_to_runs_score(info, p, q, traffic, hitters, base_scores_for_over)
                 base_scores_for_over["pressure_to_runs"] = pressure_to_runs
@@ -4195,6 +5228,11 @@ def main():
                     "pressure_to_runs": pressure_to_runs,
                     "pre_run_over_watch": pre_run_over,
                     "over_value": over_value,
+                    "strikeout_environment": strikeout_env,
+                    "bullpen_lockdown": bullpen_lockdown,
+                    "traffic_conversion": traffic_conversion_pressure,
+                    "hard_hit_efficiency": hard_hit_efficiency,
+                    "hard_hit_under_support": hard_hit_under_support,
                 }
                 predictive_move = predictive_market_move_score(opening_total, live_total, info, p, q, traffic, pre_scores)
                 pre_scores["predictive_market_move"] = predictive_move
@@ -4232,6 +5270,11 @@ def main():
                     predictive_move,
                     pressure_to_runs,
                     pre_run_over,
+                    strikeout_env,
+                    bullpen_lockdown,
+                    traffic_conversion_pressure,
+                    hard_hit_efficiency,
+                    hard_hit_under_support,
                 )
 
                 projected_total = projected_final_total(info, expected_future)
@@ -4256,6 +5299,11 @@ def main():
                     market_res,
                     blowout,
                     under_env,
+                    strikeout_env,
+                    bullpen_lockdown,
+                    traffic_conversion_pressure,
+                    hard_hit_efficiency,
+                    hard_hit_under_support,
                 )
 
                 scores = {
@@ -4281,6 +5329,12 @@ def main():
                     "predictive_market_move": predictive_move,
                     "run_suppression": suppression,
                     "false_dominance": false_dom,
+                    "strikeout_environment": strikeout_env,
+                    "bullpen_lockdown": bullpen_lockdown,
+                    "traffic_conversion": traffic_conversion_pressure,
+                    "hard_hit_efficiency": hard_hit_efficiency,
+                    "hard_hit_under_support": hard_hit_under_support,
+                    "live_total": live_total,
                 }
 
                 if info["status"] == "Live":
@@ -4311,7 +5365,7 @@ def main():
                     f"Scenario {scenario} | "
                     f"CIP {current_pressure} RO {remaining_opp} Stress {stress} Dom {dominance} Contact {contact} "
                     f"Trend {contact_trend} Lineup {lineup_pressure} Bullpen {bullpen} Exit {starter_exit} TTO {tto} "
-                    f"Fake {fake_pressure} UnderEnv {under_env} Conv {run_conversion} Prev {run_prevention} PredMove {predictive_move} MarketRes {market_res} Supp {suppression} FalseDom {false_dom} | "
+                    f"Fake {fake_pressure} UnderEnv {under_env} Conv {run_conversion} Prev {run_prevention} KEnv {strikeout_env} BPLock {bullpen_lockdown} TConv {traffic_conversion_pressure} HHEff {hard_hit_efficiency} HHUnder {hard_hit_under_support} PredMove {predictive_move} MarketRes {market_res} Supp {suppression} FalseDom {false_dom} | "
                     f"Pitcher {info['pitcher_name']} PC {p['pitch_count']} H/W/K {p['hits']}/{p['walks']}/{p['strikeouts']} | "
                     f"Next {format_hitters(hitters)}"
                 )
@@ -4349,6 +5403,8 @@ def main():
 
         except Exception as e:
             print("ERROR:", repr(e))
+
+        maybe_send_daily_learning_report(state, any_live)
 
         sleep_seconds = determine_next_sleep(any_live, any_near_strike)
         print(f"Sleeping {sleep_seconds} seconds...\n")
