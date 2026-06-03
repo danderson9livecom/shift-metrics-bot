@@ -11,9 +11,11 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V2.4.2 TRACKING + ACTIONABLE RECOMMENDATIONS + RESULT SMS
+SHIFT MLB V3.5 REAL-TIME DATA ADAPTER + BET NOW ONLY
 
 Professional live MLB totals monitor.
+V3.5 keeps the V3.4 intelligence engine and formalizes the real-time data adapter layer.
+It uses MLB Stats API for live game context, probable pitchers, current batter, batting-order pocket, pitch/play-by-play context, and The Odds API for bookmaker totals. Premium providers can be added later through environment switches without rewriting the betting engine.
 V2.2.1 adds:
     - Dedicated Pre-Run OVER WATCH engine
     - Pressure-to-runs conversion confirmation
@@ -53,7 +55,7 @@ Important:
 load_dotenv()
 
 TZ = ZoneInfo("America/Phoenix")
-STATE_FILE = os.getenv("STATE_FILE", "shift_v2_state.json")
+STATE_FILE = os.getenv("STATE_FILE", "shift_v35_state.json")
 
 STRIKE_HISTORY_FILE = os.getenv("STRIKE_HISTORY_FILE", "strike_history.csv")
 CLV_HISTORY_FILE = os.getenv("CLV_HISTORY_FILE", "clv_history.csv")
@@ -85,7 +87,7 @@ ENABLE_ACTIONABLE_DAILY_RECOMMENDATIONS = os.getenv("ENABLE_ACTIONABLE_DAILY_REC
 MIN_RECOMMENDATION_SAMPLE = int(os.getenv("MIN_RECOMMENDATION_SAMPLE", "2"))
 
 DAILY_LEARNING_REPORT_HOUR = int(os.getenv("DAILY_LEARNING_REPORT_HOUR", "22"))
-MIN_PATTERN_SAMPLE_FOR_REPORT = int(os.getenv("MIN_PATTERN_SAMPLE_FOR_REPORT", "3"))
+MIN_PATTERN_SAMPLE_FOR_REPORT = int(os.getenv("MIN_PATTERN_SAMPLE_FOR_REPORT", "30"))
 
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
@@ -99,6 +101,17 @@ ACTIVE_POLL_SECONDS = int(os.getenv("ACTIVE_POLL_SECONDS", "45"))
 FAST_POLL_SECONDS = int(os.getenv("FAST_POLL_SECONDS", "20"))
 
 PREGAME_WINDOW_MINUTES = int(os.getenv("PREGAME_WINDOW_MINUTES", "45"))
+
+# V3.5 real-time data adapter controls.
+# No paid premium feed is required for the default setup.
+LIVE_GAME_PROVIDER = os.getenv("LIVE_GAME_PROVIDER", "mlb_stats_api").lower().strip()
+ODDS_PROVIDER = os.getenv("ODDS_PROVIDER", "the_odds_api").lower().strip()
+PREMIUM_DATA_PROVIDER = os.getenv("PREMIUM_DATA_PROVIDER", "none").lower().strip()
+ENABLE_MLB_STATS_API_CONTEXT = os.getenv("ENABLE_MLB_STATS_API_CONTEXT", "true").lower() == "true"
+SPORTSDATAIO_KEY = os.getenv("SPORTSDATAIO_KEY", "").strip()
+OPTICODDS_KEY = os.getenv("OPTICODDS_KEY", "").strip()
+SPORTRADAR_KEY = os.getenv("SPORTRADAR_KEY", "").strip()
+
 
 # V2.1 separates OVER and UNDER thresholds.
 # Unders often require a slightly smaller model edge because live markets can overinflate after early runs.
@@ -116,8 +129,127 @@ EDGE_IMPROVEMENT_TO_REPEAT = float(os.getenv("EDGE_IMPROVEMENT_TO_REPEAT", "0.7"
 
 # Alert controls
 SEND_WATCH_ALERTS = os.getenv("SEND_WATCH_ALERTS", "false").lower() == "true"
-MAX_ALERTS_PER_GAME_SIDE = int(os.getenv("MAX_ALERTS_PER_GAME_SIDE", "2"))
+MAX_ALERTS_PER_GAME_SIDE = int(os.getenv("MAX_ALERTS_PER_GAME_SIDE", "1"))  # legacy compatibility only; V2.6 uses one thesis per game
 LINE_IMPROVEMENT_TO_REPEAT = float(os.getenv("LINE_IMPROVEMENT_TO_REPEAT", "1.0"))
+
+# V2.5 Professional Accuracy Mode:
+# STRIKE texts should be rare, current, and decisive.
+# The model can still evaluate every game, but SMS is only for BET NOW.
+ENABLE_PRO_ACCURACY_MODE = os.getenv("ENABLE_PRO_ACCURACY_MODE", "true").lower() == "true"
+ENABLE_CURRENT_RECOMMENDATION_STATE = os.getenv("ENABLE_CURRENT_RECOMMENDATION_STATE", "true").lower() == "true"
+ENABLE_OPPOSITE_THESIS_LOCK = os.getenv("ENABLE_OPPOSITE_THESIS_LOCK", "true").lower() == "true"
+ENABLE_SAME_THESIS_RESTRIKE = os.getenv("ENABLE_SAME_THESIS_RESTRIKE", "false").lower() == "true"
+ENABLE_SHIFT_REVERSAL = os.getenv("ENABLE_SHIFT_REVERSAL", "true").lower() == "true"
+
+# A true reversal is rare. It must be much stronger than the original thesis.
+MIN_REVERSAL_INNINGS_PASSED = float(os.getenv("MIN_REVERSAL_INNINGS_PASSED", "2.0"))
+MIN_REVERSAL_CONFIDENCE = int(os.getenv("MIN_REVERSAL_CONFIDENCE", "85"))
+MIN_REVERSAL_EDGE = float(os.getenv("MIN_REVERSAL_EDGE", "2.5"))
+MIN_REVERSAL_PROJECTION_SCORE = int(os.getenv("MIN_REVERSAL_PROJECTION_SCORE", "85"))
+MIN_REVERSAL_CONFIRMATION_SCORE = int(os.getenv("MIN_REVERSAL_CONFIRMATION_SCORE", "85"))
+
+# Professional OVER filters.
+BLOCK_OVER_ON_THREE_OUTS = os.getenv("BLOCK_OVER_ON_THREE_OUTS", "true").lower() == "true"
+BLOCK_OVER_AT_INNING_TRANSITION = os.getenv("BLOCK_OVER_AT_INNING_TRANSITION", "true").lower() == "true"
+BLOCK_CONTACT_ONLY_OVER = os.getenv("BLOCK_CONTACT_ONLY_OVER", "true").lower() == "true"
+MIN_CONTACT_ONLY_P2R = int(os.getenv("MIN_CONTACT_ONLY_P2R", "75"))
+MIN_CONTACT_ONLY_TRAFFIC_CONV = int(os.getenv("MIN_CONTACT_ONLY_TRAFFIC_CONV", "55"))
+
+# Extreme totals need an elite setup, not just a model projection.
+MIN_EXTREME_TOTAL_EDGE_V25 = float(os.getenv("MIN_EXTREME_TOTAL_EDGE_V25", "4.5"))
+MIN_EXTREME_TOTAL_CONFIRMATION_V25 = int(os.getenv("MIN_EXTREME_TOTAL_CONFIRMATION_V25", "85"))
+MIN_EXTREME_TOTAL_PROJECTION_V25 = int(os.getenv("MIN_EXTREME_TOTAL_PROJECTION_V25", "85"))
+MIN_EXTREME_TOTAL_P2R_V25 = int(os.getenv("MIN_EXTREME_TOTAL_P2R_V25", "85"))
+MIN_EXTREME_TOTAL_CONV_V25 = int(os.getenv("MIN_EXTREME_TOTAL_CONV_V25", "85"))
+
+# Early UNDERs are dangerous unless run suppression is obvious.
+MIN_EARLY_UNDER_INNING = int(os.getenv("MIN_EARLY_UNDER_INNING", "5"))
+MIN_EARLY_UNDER_K_ENV = int(os.getenv("MIN_EARLY_UNDER_K_ENV", "75"))
+MIN_EARLY_UNDER_BULPEN_LOCK = int(os.getenv("MIN_EARLY_UNDER_BULPEN_LOCK", "65"))
+MAX_EARLY_UNDER_CONTACT = int(os.getenv("MAX_EARLY_UNDER_CONTACT", "35"))
+MAX_EARLY_UNDER_P2R = int(os.getenv("MAX_EARLY_UNDER_P2R", "25"))
+MIN_EARLY_UNDER_EDGE = float(os.getenv("MIN_EARLY_UNDER_EDGE", "1.8"))
+
+# V2.6 final decision engine. This is the single SMS gate.
+# It prevents duplicate theses, opposite-side confusion, and parser-built SMS.
+ENABLE_V26_SINGLE_DECISION_ENGINE = os.getenv("ENABLE_V26_SINGLE_DECISION_ENGINE", "true").lower() == "true"
+V26_ONE_BET_NOW_PER_GAME = os.getenv("V26_ONE_BET_NOW_PER_GAME", "true").lower() == "true"
+V26_ALLOW_REVERSAL_ONLY = os.getenv("V26_ALLOW_REVERSAL_ONLY", "true").lower() == "true"
+V26_MIN_BETNOW_CONFIDENCE = int(os.getenv("V26_MIN_BETNOW_CONFIDENCE", "70"))
+V26_MIN_BETNOW_EDGE = float(os.getenv("V26_MIN_BETNOW_EDGE", "1.4"))
+V26_MIN_VALUE_SCORE = int(os.getenv("V26_MIN_VALUE_SCORE", "70"))
+V26_MAX_RISK_SCORE = int(os.getenv("V26_MAX_RISK_SCORE", "54"))
+V26_EXTREME_MAX_RISK_SCORE = int(os.getenv("V26_EXTREME_MAX_RISK_SCORE", "40"))
+V26_REJECT_STALE_STATUS = os.getenv("V26_REJECT_STALE_STATUS", "true").lower() == "true"
+
+# V3.0 Market Intelligence layer. Uses the same Odds API response when book-level
+# data is available. No extra API calls.
+ENABLE_MARKET_INTELLIGENCE = os.getenv("ENABLE_MARKET_INTELLIGENCE", "true").lower() == "true"
+REQUIRE_MARKET_CONFIRMATION_WHEN_AVAILABLE = os.getenv("REQUIRE_MARKET_CONFIRMATION_WHEN_AVAILABLE", "true").lower() == "true"
+MIN_MARKET_BOOKS_FOR_CONFIRMATION = int(os.getenv("MIN_MARKET_BOOKS_FOR_CONFIRMATION", "2"))
+MIN_MARKET_CONFIRMATION_SCORE = int(os.getenv("MIN_MARKET_CONFIRMATION_SCORE", "60"))
+MIN_MARKET_CONFIRMATION_EXTREME = int(os.getenv("MIN_MARKET_CONFIRMATION_EXTREME", "75"))
+MARKET_VELOCITY_WINDOW_SECONDS = int(os.getenv("MARKET_VELOCITY_WINDOW_SECONDS", "900"))
+LINE_VELOCITY_STRONG_MOVE = float(os.getenv("LINE_VELOCITY_STRONG_MOVE", "1.0"))
+MARKET_DISAGREEMENT_STRONG = float(os.getenv("MARKET_DISAGREEMENT_STRONG", "1.0"))
+PREFERRED_BOOKS = [b.strip().lower() for b in os.getenv("PREFERRED_BOOKS", "betmgm,draftkings,fanduel,caesars,espnbet,bet365,fanatics").split(",") if b.strip()]
+
+# V3.1 practical live-app controls.
+# Do not chase markets that already moved too far unless baseball + market confirmation are elite.
+DO_NOT_CHASE_MOVE_FROM_OPEN = float(os.getenv("DO_NOT_CHASE_MOVE_FROM_OPEN", "3.0"))
+DO_NOT_CHASE_MIN_CONFIDENCE = int(os.getenv("DO_NOT_CHASE_MIN_CONFIDENCE", "88"))
+DO_NOT_CHASE_MIN_EDGE = float(os.getenv("DO_NOT_CHASE_MIN_EDGE", "4.0"))
+DO_NOT_CHASE_MIN_MARKET_CONFIRMATION = int(os.getenv("DO_NOT_CHASE_MIN_MARKET_CONFIRMATION", "78"))
+PRICE_ADJUSTED_HALF_RUN_VALUE = int(os.getenv("PRICE_ADJUSTED_HALF_RUN_VALUE", "18"))
+
+# V3.2 practical live-app controls.
+# These force the final recommended play to be what a user can realistically bet.
+ENABLE_V32_BEST_LINE_REWRITE = os.getenv("ENABLE_V32_BEST_LINE_REWRITE", "true").lower() == "true"
+MAX_BEST_LINE_AGE_SECONDS = int(os.getenv("MAX_BEST_LINE_AGE_SECONDS", "90"))
+REQUIRE_POSITIVE_EV = os.getenv("REQUIRE_POSITIVE_EV", "true").lower() == "true"
+MIN_EXPECTED_VALUE = float(os.getenv("MIN_EXPECTED_VALUE", "0.00"))
+RUN_EDGE_TO_PROB_PER_RUN = float(os.getenv("RUN_EDGE_TO_PROB_PER_RUN", "0.055"))
+MIN_STRONG_PATTERN_SAMPLE = int(os.getenv("MIN_STRONG_PATTERN_SAMPLE", "30"))
+MIN_AUTO_ADJUST_SAMPLE = int(os.getenv("MIN_AUTO_ADJUST_SAMPLE", "75"))
+APP_STATUS_STALE_SECONDS = int(os.getenv("APP_STATUS_STALE_SECONDS", "90"))
+
+# V3.3 ROI discipline controls. Fewer bad bets > more alerts.
+ENABLE_V33_ROI_DISCIPLINE = os.getenv("ENABLE_V33_ROI_DISCIPLINE", "true").lower() == "true"
+MARKET_FIRST_MIN_BOOKS = int(os.getenv("MARKET_FIRST_MIN_BOOKS", "2"))
+MARKET_FIRST_MIN_CONFIRMATION = int(os.getenv("MARKET_FIRST_MIN_CONFIRMATION", "62"))
+MARKET_FIRST_MIN_EV = float(os.getenv("MARKET_FIRST_MIN_EV", "0.015"))
+MAX_ENTRY_HALF_RUN_BUFFER = float(os.getenv("MAX_ENTRY_HALF_RUN_BUFFER", "0.5"))
+MAX_ENTRY_PRICE_OVER = int(os.getenv("MAX_ENTRY_PRICE_OVER", "-135"))
+MAX_ENTRY_PRICE_UNDER = int(os.getenv("MAX_ENTRY_PRICE_UNDER", "-130"))
+EARLY_OVER_MIN_INNING = int(os.getenv("EARLY_OVER_MIN_INNING", "3"))
+EARLY_OVER_MIN_P2R = int(os.getenv("EARLY_OVER_MIN_P2R", "82"))
+EARLY_OVER_MIN_TRAFFIC = int(os.getenv("EARLY_OVER_MIN_TRAFFIC", "65"))
+EARLY_OVER_MIN_STRESS = int(os.getenv("EARLY_OVER_MIN_STRESS", "75"))
+LATE_OVER_MAX_INNING = int(os.getenv("LATE_OVER_MAX_INNING", "7"))
+LATE_OVER_MIN_EDGE = float(os.getenv("LATE_OVER_MIN_EDGE", "3.0"))
+LATE_OVER_MIN_CONFIRMATION = int(os.getenv("LATE_OVER_MIN_CONFIRMATION", "88"))
+UNDER_DEFAULT_MIN_INNING_V33 = int(os.getenv("UNDER_DEFAULT_MIN_INNING_V33", "5"))
+UNDER_MIN_RUN_PREVENTION_V33 = int(os.getenv("UNDER_MIN_RUN_PREVENTION_V33", "72"))
+UNDER_MIN_KENV_V33 = int(os.getenv("UNDER_MIN_KENV_V33", "62"))
+UNDER_MIN_BPLOCK_V33 = int(os.getenv("UNDER_MIN_BPLOCK_V33", "55"))
+GOOD_BET_CLV_THRESHOLD = float(os.getenv("GOOD_BET_CLV_THRESHOLD", "0.5"))
+
+# V3.4 intelligence controls. These are designed to improve bet selection without
+# adding API calls. Where premium data is unavailable, they degrade safely to neutral.
+ENABLE_V34_INTELLIGENCE = os.getenv("ENABLE_V34_INTELLIGENCE", "true").lower() == "true"
+LINEUP_POCKET_MIN_OVER = int(os.getenv("LINEUP_POCKET_MIN_OVER", "58"))
+LINEUP_POCKET_MAX_UNDER_RISK = int(os.getenv("LINEUP_POCKET_MAX_UNDER_RISK", "70"))
+BULLPEN_CONTEXT_MIN_OVER = int(os.getenv("BULLPEN_CONTEXT_MIN_OVER", "48"))
+BULLPEN_CONTEXT_MIN_UNDER = int(os.getenv("BULLPEN_CONTEXT_MIN_UNDER", "58"))
+CONFIDENCE_DECAY_BLOCK_LEVEL = int(os.getenv("CONFIDENCE_DECAY_BLOCK_LEVEL", "35"))
+CONFIDENCE_DECAY_WARNING_LEVEL = int(os.getenv("CONFIDENCE_DECAY_WARNING_LEVEL", "20"))
+ENABLE_HISTORICAL_EV_CALIBRATION = os.getenv("ENABLE_HISTORICAL_EV_CALIBRATION", "true").lower() == "true"
+MIN_EV_CALIBRATION_SAMPLE = int(os.getenv("MIN_EV_CALIBRATION_SAMPLE", "50"))
+EV_CALIBRATION_CACHE_SECONDS = int(os.getenv("EV_CALIBRATION_CACHE_SECONDS", "300"))
+PREFERRED_LEADING_BOOK_BONUS = int(os.getenv("PREFERRED_LEADING_BOOK_BONUS", "6"))
+
+
+
 
 # SMS safety:
 # Twilio rejects message bodies over 1600 characters.
@@ -391,6 +523,462 @@ def market_label(price):
 
 
 
+
+
+# -----------------------------
+# V3.4 lineup / bullpen / calibration helpers
+# -----------------------------
+
+_EV_CALIBRATION_CACHE = {"loaded_at": 0, "buckets": {}}
+
+
+def batter_order_slot_score(slot):
+    """Approximate hitter quality from batting-order slot when full hitter stats are unavailable."""
+    slot = safe_int(slot, 0)
+    if slot in [1, 2, 3, 4]:
+        return 72
+    if slot in [5, 6]:
+        return 56
+    if slot in [7, 8, 9]:
+        return 38
+    return 50
+
+
+def lineup_pocket_score(info):
+    """
+    V3.4: score the next hitter pocket. If the MLB feed exposes batting-order info,
+    use it. If not, degrade to a neutral/low-information estimate from current batter only.
+    """
+    if not ENABLE_V34_INTELLIGENCE:
+        return 50
+    pocket = info.get("next_batter_pocket") or []
+    if not pocket:
+        # Current batter only: better than nothing, but no strong conviction.
+        slot = safe_int(info.get("current_batter_order_slot"), 0)
+        return round(clamp(batter_order_slot_score(slot))) if slot else 50
+    vals = []
+    for b in pocket[:3]:
+        vals.append(batter_order_slot_score(b.get("slot")))
+    return round(clamp(sum(vals) / len(vals))) if vals else 50
+
+
+def bullpen_context_score(info, scores):
+    """
+    V3.4 placeholder for bullpen quality/fatigue. Uses available live signals now;
+    can be replaced later with true rest/usage data from a premium feed.
+    Higher = more scoring risk / weaker run prevention.
+    """
+    if not ENABLE_V34_INTELLIGENCE:
+        return 50
+    inning = safe_int(info.get("inning"), 1)
+    stress = safe_int((scores or {}).get("pitcher_stress"), 0)
+    starter_exit = safe_int((scores or {}).get("starter_exit_probability"), 0)
+    bp_lock = safe_int((scores or {}).get("bullpen_lockdown"), 50)
+    kenv = safe_int((scores or {}).get("strikeout_environment"), 50)
+    risk = 42
+    if inning >= 5:
+        risk += 8
+    if inning >= 7:
+        risk += 6
+    risk += stress * 0.15
+    risk += starter_exit * 0.12
+    risk -= bp_lock * 0.18
+    risk -= max(0, kenv - 50) * 0.10
+    return round(clamp(risk))
+
+
+def confidence_decay_score(state_game, info, opportunity):
+    """
+    V3.4: reduce trust when the current setup is likely stale. This matters for
+    login/feed status and prevents borderline alerts after the situation changes.
+    """
+    if not ENABLE_V34_INTELLIGENCE or not opportunity:
+        return 0
+    decay = 0
+    side = str(opportunity.get("side", "")).upper()
+    outs = safe_int(info.get("outs"), 0)
+    base_label = str((info.get("base_state") or {}).get("label", "")).lower()
+    inning_state = str(info.get("inning_state") or "").lower()
+    scores = opportunity.get("scores", {}) or {}
+
+    if outs >= 3 or inning_state.startswith("middle") or inning_state.startswith("end"):
+        decay += 28
+    if side == "OVER" and ("bases empty" in base_label or base_label in ["", "empty"]):
+        decay += 18
+    if side == "OVER" and "runner on 1st" in base_label and outs >= 2:
+        decay += 14
+    if side == "UNDER" and safe_int(scores.get("pitcher_stress"), 0) >= 75:
+        decay += 16
+    if side == "UNDER" and safe_int(scores.get("pressure_to_runs"), 0) >= 55:
+        decay += 14
+
+    active = (state_game or {}).get("active_thesis") or {}
+    if active:
+        active_inning = safe_float(active.get("inning_float"), safe_float(active.get("inning"), 0))
+        if inning_float(info) - active_inning >= 1.0:
+            decay += 10
+        if active.get("base_out") and base_label and base_label not in str(active.get("base_out", "")).lower():
+            decay += 8
+    return round(clamp(decay))
+
+
+def edge_bucket(edge):
+    e = abs(safe_float(edge, 0))
+    if e < 1.0:
+        return "0.0-1.0"
+    if e < 1.5:
+        return "1.0-1.5"
+    if e < 2.0:
+        return "1.5-2.0"
+    if e < 3.0:
+        return "2.0-3.0"
+    if e < 4.0:
+        return "3.0-4.0"
+    return "4.0+"
+
+
+def load_ev_calibration_buckets():
+    """Use stored graded results to calibrate edge-to-win probability once sample is large enough."""
+    now_ts = time.time()
+    if now_ts - _EV_CALIBRATION_CACHE.get("loaded_at", 0) < EV_CALIBRATION_CACHE_SECONDS:
+        return _EV_CALIBRATION_CACHE.get("buckets", {})
+    buckets = {}
+    if ENABLE_HISTORICAL_EV_CALIBRATION and os.path.exists(GRADED_RESULTS_FILE):
+        for r in csv_read_rows(GRADED_RESULTS_FILE):
+            if r.get("result") not in ["WIN", "LOSS"]:
+                continue
+            side = str(r.get("side", "")).upper()
+            b = edge_bucket(r.get("edge"))
+            key = (side, b)
+            node = buckets.setdefault(key, {"wins": 0, "losses": 0})
+            if r.get("result") == "WIN":
+                node["wins"] += 1
+            else:
+                node["losses"] += 1
+    _EV_CALIBRATION_CACHE["loaded_at"] = now_ts
+    _EV_CALIBRATION_CACHE["buckets"] = buckets
+    return buckets
+
+
+def calibrated_model_probability(side, edge, fallback_prob):
+    buckets = load_ev_calibration_buckets()
+    key = (str(side or "").upper(), edge_bucket(edge))
+    node = buckets.get(key)
+    if not node:
+        return fallback_prob, "formula"
+    sample = safe_int(node.get("wins"), 0) + safe_int(node.get("losses"), 0)
+    if sample < MIN_EV_CALIBRATION_SAMPLE:
+        return fallback_prob, f"formula/sample {sample}"
+    raw = safe_int(node.get("wins"), 0) / max(1, sample)
+    # Blend to avoid overreacting to one bucket.
+    blended = (raw * 0.70) + (safe_float(fallback_prob, 0.5) * 0.30)
+    return round(max(0.38, min(0.72, blended)), 4), f"historical {node.get('wins')}-{node.get('losses')}"
+
+
+def leading_book_score(side, velocity_info):
+    if not ENABLE_V34_INTELLIGENCE:
+        return 50
+    side = str(side or "").upper()
+    leading = str((velocity_info or {}).get("leading_book") or "").lower()
+    move = 0
+    for v in ((velocity_info or {}).get("book_velocities") or {}).values():
+        if str(v.get("book") or "").lower() == leading:
+            move = safe_float(v.get("move"), 0)
+            break
+    score = 50
+    if leading:
+        if any(pb in leading for pb in PREFERRED_BOOKS):
+            score += PREFERRED_LEADING_BOOK_BONUS
+        if side == "OVER" and move > 0:
+            score += min(18, move * 12)
+        if side == "UNDER" and move < 0:
+            score += min(18, abs(move) * 12)
+        if side == "OVER" and move < 0:
+            score -= min(18, abs(move) * 12)
+        if side == "UNDER" and move > 0:
+            score -= min(18, move * 12)
+    return round(clamp(score))
+
+# -----------------------------
+# V3.2 practical betting math
+# -----------------------------
+
+def american_to_implied_probability(price):
+    """Return break-even probability for American odds."""
+    p = safe_int(price, 0)
+    if p == 0:
+        return None
+    if p > 0:
+        return round(100.0 / (p + 100.0), 4)
+    return round(abs(p) / (abs(p) + 100.0), 4)
+
+
+def run_edge_to_model_probability(side, edge):
+    """
+    Convert run edge into a conservative rough probability estimate.
+    This is not a true distribution model; it is an EV sanity check so the bot
+    does not blindly accept bad prices. One run of edge is treated as about
+    RUN_EDGE_TO_PROB_PER_RUN above 50%, capped to avoid false precision.
+    """
+    side = str(side or "").upper()
+    e = safe_float(edge, 0)
+    directional_edge = e if side == "OVER" else -e
+    prob = 0.50 + directional_edge * RUN_EDGE_TO_PROB_PER_RUN
+    return round(max(0.38, min(0.72, prob)), 4)
+
+
+def expected_value_per_unit(side, edge, price):
+    """Expected profit per 1 unit risked, with V3.4 historical calibration when enough samples exist."""
+    formula_prob = run_edge_to_model_probability(side, edge)
+    model_prob, prob_source = calibrated_model_probability(side, edge, formula_prob)
+    breakeven = american_to_implied_probability(price)
+    if breakeven is None:
+        return {"model_probability": model_prob, "break_even_probability": None, "expected_value": None, "probability_source": prob_source}
+    p = safe_int(price, 0)
+    win_profit = (p / 100.0) if p > 0 else (100.0 / abs(p))
+    ev = model_prob * win_profit - (1 - model_prob)
+    return {
+        "model_probability": round(model_prob, 4),
+        "break_even_probability": round(breakeven, 4),
+        "expected_value": round(ev, 4),
+        "probability_source": prob_source,
+    }
+
+
+def parse_iso_timestamp(ts):
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def book_line_age_seconds(book_line):
+    """Age of the book's last update if the provider supplies a timestamp."""
+    if not book_line:
+        return None
+    ts = parse_iso_timestamp(book_line.get("last_update"))
+    if ts is None:
+        return None
+    return max(0, round(time.time() - ts))
+
+
+
+def max_entry_line_for(opportunity):
+    """
+    Hard no-chase line for the user. This turns BET NOW into a practical app instruction.
+    OVER: do not enter if the total rises above line + buffer.
+    UNDER: do not enter if the total falls below line - buffer.
+    """
+    if not opportunity:
+        return None
+    side = str(opportunity.get("side", "")).upper()
+    line = safe_float(opportunity.get("line"), None)
+    if line is None:
+        return None
+    if side == "OVER":
+        return round(line + MAX_ENTRY_HALF_RUN_BUFFER, 1)
+    if side == "UNDER":
+        return round(line - MAX_ENTRY_HALF_RUN_BUFFER, 1)
+    return line
+
+
+def max_entry_price_for(side):
+    side = str(side or "").upper()
+    return MAX_ENTRY_PRICE_OVER if side == "OVER" else MAX_ENTRY_PRICE_UNDER
+
+
+def v33_market_first_block_reason(info, market_context, opportunity):
+    """
+    Market-first gate. We only let baseball logic speak after the market/app line is playable.
+    This is designed to reduce bad bets and chasing stale numbers.
+    """
+    if not ENABLE_V33_ROI_DISCIPLINE or not opportunity:
+        return None
+    side = str(opportunity.get("side", "")).upper()
+    price = safe_int(opportunity.get("price"), 0)
+    edge = abs(safe_float(opportunity.get("edge"), 0))
+    book_count = safe_int((market_context or {}).get("book_count"), 0)
+    mconf = safe_int((market_context or {}).get("market_confirmation_score"), 50)
+    age = safe_float((market_context or {}).get("best_line_age_seconds"), None)
+    ev = expected_value_per_unit(side, opportunity.get("edge"), opportunity.get("price")).get("expected_value")
+
+    if book_count >= MARKET_FIRST_MIN_BOOKS and mconf < MARKET_FIRST_MIN_CONFIRMATION:
+        return f"market-first block: confirmation {mconf} below {MARKET_FIRST_MIN_CONFIRMATION}"
+    if age is not None and age > MAX_BEST_LINE_AGE_SECONDS:
+        return f"market-first block: best line stale ({int(age)}s)"
+    if ev is not None and ev < MARKET_FIRST_MIN_EV:
+        return f"market-first block: EV {ev:+.3f} below ROI minimum {MARKET_FIRST_MIN_EV:+.3f}"
+    max_price = max_entry_price_for(side)
+    if price and price < max_price and edge < 3.0:
+        return f"market-first block: price {price} too expensive without elite edge"
+    return None
+
+
+def v33_baseball_quality_block_reason(info, opportunity):
+    """Extra baseball discipline to avoid fragile live-total bets."""
+    if not ENABLE_V33_ROI_DISCIPLINE or not opportunity:
+        return None
+    side = str(opportunity.get("side", "")).upper()
+    scores = opportunity.get("scores", {}) or {}
+    inning = safe_int(info.get("inning"), 0)
+    outs = safe_int(info.get("outs"), 0)
+    edge_abs = abs(safe_float(opportunity.get("edge"), 0))
+    conf = safe_int(opportunity.get("confidence"), safe_int(scores.get("confirmation_score"), 0))
+    p2r = safe_int(scores.get("pressure_to_runs"), 0)
+    tconv = safe_int(scores.get("traffic_conversion"), 0)
+    stress = safe_int(scores.get("pitcher_stress"), 0)
+    run_prev = safe_int(scores.get("run_prevention"), 0)
+    kenv = safe_int(scores.get("strikeout_environment"), 0)
+    bp = safe_int(scores.get("bullpen_lockdown"), 0)
+    lineup_score = lineup_pocket_score(info)
+    bullpen_risk = bullpen_context_score(info, scores)
+
+    base_label = str((info.get("base_state") or {}).get("label", "")).lower()
+    weak_traffic = ("bases empty" in base_label) or ("runner on 1st" in base_label and outs >= 2)
+
+    if side == "OVER":
+        if inning < EARLY_OVER_MIN_INNING and not (p2r >= EARLY_OVER_MIN_P2R and tconv >= EARLY_OVER_MIN_TRAFFIC and stress >= EARLY_OVER_MIN_STRESS):
+            return "baseball block: early OVER lacks elite pressure/traffic/stress"
+        if lineup_score < LINEUP_POCKET_MIN_OVER and p2r < 90:
+            return f"baseball block: OVER lacks lineup-pocket support ({lineup_score})"
+        if bullpen_risk < BULLPEN_CONTEXT_MIN_OVER and inning >= 5 and p2r < 85:
+            return f"baseball block: OVER lacks bullpen/fatigue support ({bullpen_risk})"
+        if weak_traffic and p2r < 85:
+            return "baseball block: OVER profile too fragile with weak traffic"
+        if inning >= LATE_OVER_MAX_INNING and not (edge_abs >= LATE_OVER_MIN_EDGE and conf >= LATE_OVER_MIN_CONFIRMATION):
+            return "baseball block: late OVER needs elite edge and confirmation"
+
+    if side == "UNDER":
+        if inning < UNDER_DEFAULT_MIN_INNING_V33 and not (run_prev >= 85 and kenv >= 75 and bp >= 65):
+            return "baseball block: early UNDER needs elite run prevention/K/bullpen profile"
+        if run_prev < UNDER_MIN_RUN_PREVENTION_V33 and (kenv < UNDER_MIN_KENV_V33 or bp < UNDER_MIN_BPLOCK_V33):
+            return "baseball block: UNDER lacks run-prevention support"
+        if lineup_score > LINEUP_POCKET_MAX_UNDER_RISK and run_prev < 88:
+            return f"baseball block: UNDER facing dangerous lineup pocket ({lineup_score})"
+        if (100 - bullpen_risk) < BULLPEN_CONTEXT_MIN_UNDER and inning >= 6:
+            return f"baseball block: UNDER lacks bullpen lockdown context ({100 - bullpen_risk})"
+    return None
+
+
+def classify_bet_quality(row):
+    """
+    Separates bet quality from game result. A loss can be a good bet; a win can be a bad bet.
+    """
+    result = str(row.get("result", "")).upper()
+    ev = safe_float(row.get("expected_value"), 0)
+    mconf = safe_int(row.get("market_confirmation_score"), 0)
+    risk = safe_int(row.get("risk_filter_score"), 0)
+    clv = safe_float(row.get("clv", 0), 0)
+    positive_market = mconf >= MARKET_FIRST_MIN_CONFIRMATION
+    positive_ev = ev >= MARKET_FIRST_MIN_EV
+    low_risk = risk <= V26_MAX_RISK_SCORE
+    beat_clv = clv >= GOOD_BET_CLV_THRESHOLD
+
+    if positive_ev and positive_market and low_risk:
+        label = "GOOD_BET"
+    elif beat_clv and positive_market:
+        label = "GOOD_BET_CLV"
+    elif result == "WIN":
+        label = "GOOD_RESULT_QUESTIONABLE_BET"
+    else:
+        label = "BAD_BET_REVIEW"
+    reason = f"EV {ev:+.3f} | MktConf {mconf} | Risk {risk} | CLV {clv:+.1f}"
+    return label, reason
+
+def recommended_app_status(opportunity, market_context):
+    """Short practical status for real live betting apps."""
+    if not opportunity:
+        return "NO BET — no qualifying play"
+    price = opportunity.get("price")
+    side = str(opportunity.get("side", "")).upper()
+    line = opportunity.get("line")
+    book = opportunity.get("recommended_book") or market_context.get("recommended_book") or market_context.get("price_adjusted_best_book") or market_context.get("best_book")
+    age = safe_int(market_context.get("best_line_age_seconds"), 0)
+    if age and age > APP_STATUS_STALE_SECONDS:
+        return "NO BET — best line may be stale"
+    ev = expected_value_per_unit(side, opportunity.get("edge"), price).get("expected_value")
+    if ev is not None and ev < MIN_EXPECTED_VALUE:
+        return "NO BET — price/EV not playable"
+    if book:
+        return f"BET NOW — only if {book} still shows {side} {line} or better"
+    return f"BET NOW — only if your app still shows {side} {line} or better"
+
+
+def apply_price_adjusted_best_line(info, market_context, opportunity):
+    """
+    V3.2 practical rewrite: the recommended play should be the best app line,
+    not the primary-book line that triggered the model.
+    """
+    if not ENABLE_V32_BEST_LINE_REWRITE or not opportunity:
+        return opportunity
+    side = str(opportunity.get("side", "")).upper()
+    best_line = market_context.get("price_adjusted_best_total") or market_context.get("best_available_total")
+    best_price = market_context.get("price_adjusted_best_price") or market_context.get("best_available_price")
+    best_book = market_context.get("price_adjusted_best_book") or market_context.get("best_book")
+    if best_line is None:
+        return opportunity
+    best_line = safe_float(best_line, None)
+    if best_line is None:
+        return opportunity
+
+    # Use the same projected total but recompute the actionable edge to the line a user can bet.
+    projected = safe_float(opportunity.get("projected_total", opportunity.get("projection")), None)
+    if projected is None:
+        return opportunity
+    new_edge = round(projected - best_line, 1)
+    # If the best-app line flips the edge below the basic watch threshold, it is no longer practical.
+    if side == "OVER" and new_edge < MIN_WATCH_EDGE_RUNS:
+        opportunity["action"] = "NO_PLAY"
+        opportunity["app_status"] = "NO BET — best available app line killed the edge"
+        return opportunity
+    if side == "UNDER" and new_edge > -MIN_WATCH_EDGE_RUNS:
+        opportunity["action"] = "NO_PLAY"
+        opportunity["app_status"] = "NO BET — best available app line killed the edge"
+        return opportunity
+    if not price_ok(best_price, abs(new_edge)):
+        opportunity["action"] = "NO_PLAY"
+        opportunity["app_status"] = "NO BET — best available price outside playable range"
+        return opportunity
+
+    ev = expected_value_per_unit(side, new_edge, best_price)
+    opportunity["line"] = best_line
+    opportunity["price"] = best_price
+    opportunity["edge"] = new_edge
+    opportunity["edge_grade"] = edge_grade(new_edge)
+    opportunity["recommended_book"] = best_book
+    opportunity["recommended_total"] = best_line
+    opportunity["recommended_price"] = best_price
+    opportunity.update(ev)
+    opportunity["max_entry_line"] = max_entry_line_for(opportunity)
+    opportunity["max_entry_price"] = max_entry_price_for(side)
+    opportunity["app_status"] = recommended_app_status(opportunity, market_context)
+    return opportunity
+
+
+def market_quality_tags(row):
+    """Bucket results by market-intelligence quality for the daily report."""
+    tags = []
+    if safe_int(row.get("market_confirmation_score"), 0) >= MIN_MARKET_CONFIRMATION_SCORE:
+        tags.append("MARKET_CONFIRMED")
+    else:
+        tags.append("MARKET_NOT_CONFIRMED")
+    if row.get("price_adjusted_best_total") and row.get("recommended_total"):
+        tags.append("BEST_LINE_USED")
+    if abs(safe_float(row.get("line_velocity"), 0)) >= LINE_VELOCITY_STRONG_MOVE:
+        tags.append("HIGH_VELOCITY")
+    if safe_float(row.get("market_disagreement"), 0) >= MARKET_DISAGREEMENT_STRONG:
+        tags.append("BOOK_DISAGREEMENT")
+    if safe_float(row.get("expected_value"), -1) >= MIN_EXPECTED_VALUE:
+        tags.append("POSITIVE_EV")
+    return tags
+
+
+def summarize_bucket(label, rows):
+    w, l, p, pct, units = summarize_record(rows)
+    return f"{label}: {w}-{l}-{p} | {pct}% | {units:+.2f}u"
+
 def tracking_webhook_enabled():
     if not ENABLE_TRACKING_WEBHOOK or not TRACKING_WEBHOOK_URL:
         return False
@@ -414,7 +1002,7 @@ def post_tracking_event(event_type, payload):
     body = {
         "event_type": event_type,
         "sent_at": now_local().isoformat(),
-        "source": "SHIFT_MLB_V2_4_2",
+        "source": "SHIFT_MLB_V3_4_INTEL",
         "payload": payload,
     }
     headers = {"Content-Type": "application/json"}
@@ -503,7 +1091,7 @@ def csv_append_once(path, fieldnames, row):
     exists = os.path.exists(path)
     try:
         with open(path, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             if not exists:
                 writer.writeheader()
             writer.writerow(row)
@@ -526,7 +1114,7 @@ def csv_read_rows(path):
 def csv_write_rows(path, fieldnames, rows):
     try:
         with open(path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             for row in rows:
                 writer.writerow({k: row.get(k, "") for k in fieldnames})
@@ -709,6 +1297,17 @@ def strike_fieldnames():
         "threat_index", "signal_stack", "market_lag", "conv_acceleration",
         "k_env", "bullpen_lockdown", "traffic_conversion", "hh_eff", "hh_under",
         "over_pressure_score", "under_suppression_score", "market_value_score", "risk_filter_score",
+        "consensus_total", "market_min_total", "market_max_total", "market_disagreement",
+        "line_velocity", "line_direction", "primary_book", "best_book", "best_available_total",
+        "best_available_price", "price_adjusted_best_book", "price_adjusted_best_total",
+        "price_adjusted_best_price", "market_confirmation_score", "book_count",
+        "first_seen_total", "true_opening_total", "recommended_book", "recommended_total",
+        "recommended_price", "best_line_age_seconds", "best_line_last_update",
+        "book_velocity_summary", "leading_book", "model_probability",
+        "break_even_probability", "expected_value", "max_entry_line", "max_entry_price",
+        "app_status", "bet_quality", "quality_reason",
+        "lineup_pressure_score", "bullpen_context_score", "confidence_decay_score",
+        "probability_source", "leading_book_score",
         "scenario", "action", "pattern_tags",
         "final_score", "final_total", "result", "graded_at",
     ]
@@ -786,7 +1385,7 @@ def build_learning_summary():
         denom = max(1, wins + losses)
         win_pct = round((wins / denom) * 100, 1)
 
-        if total < 5:
+        if total < MIN_STRONG_PATTERN_SAMPLE:
             note = "Small sample"
             recommendation = "Track only"
         elif win_pct >= 62:
@@ -901,6 +1500,25 @@ def build_actionable_recommendations(graded_rows):
     return notes[:5]
 
 
+
+def independent_decision_rows(rows):
+    """
+    Collapse same-game same-side duplicates so the learning report separates raw alerts
+    from true independent BET NOW decisions.
+    """
+    seen = set()
+    out = []
+    for r in rows:
+        key = (r.get("date"), r.get("game_pk") or r.get("game"), r.get("side"))
+        if r.get("scenario", "").upper().startswith("SHIFT REVERSAL"):
+            key = key + ("REVERSAL",)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
 def generate_daily_learning_report(report_date=None):
     """
     Creates a professional daily report from graded_results.csv, learning_summary.csv,
@@ -932,7 +1550,10 @@ def generate_daily_learning_report(report_date=None):
         return "\n".join(lines)
 
     w, l, p, pct, units = summarize_record(graded)
-    lines.append(f"Today: {w}-{l}-{p} | {pct}% | {units:+.2f}u")
+    lines.append(f"Raw Alerts Today: {w}-{l}-{p} | {pct}% | {units:+.2f}u")
+    independent = independent_decision_rows(graded)
+    iw, il, ip, ipct, iunits = summarize_record(independent)
+    lines.append(f"Independent Decisions: {iw}-{il}-{ip} | {ipct}% | {iunits:+.2f}u")
 
     over_rows = [r for r in graded if str(r.get("side", "")).upper() == "OVER"]
     under_rows = [r for r in graded if str(r.get("side", "")).upper() == "UNDER"]
@@ -953,6 +1574,32 @@ def generate_daily_learning_report(report_date=None):
         total = len(clv_rows)
         avg_clv = round(avg([safe_float(r.get("clv"), 0) for r in clv_rows]), 2)
         lines.append(f"CLV: beat market {beat}/{total} | Avg CLV {avg_clv:+.2f}")
+
+    lines.append("")
+    lines.append("Market-Quality Buckets:")
+    bucket_map = {}
+    for r in graded:
+        for tag in market_quality_tags(r):
+            bucket_map.setdefault(tag, []).append(r)
+    if bucket_map:
+        for tag, rows in sorted(bucket_map.items(), key=lambda kv: len(kv[1]), reverse=True)[:8]:
+            lines.append("• " + summarize_bucket(tag, rows))
+    else:
+        lines.append("No market-quality buckets yet.")
+
+    quality_map = {}
+    for r in graded:
+        quality_map.setdefault(r.get("bet_quality") or classify_bet_quality(r)[0], []).append(r)
+    if quality_map:
+        lines.append("")
+        lines.append("Bet-Quality Buckets:")
+        for tag, rows in sorted(quality_map.items(), key=lambda kv: len(kv[1]), reverse=True):
+            lines.append("• " + summarize_bucket(tag, rows))
+
+    lines.append("")
+    lines.append("Sample Discipline:")
+    lines.append(f"• Strong-pattern label requires {MIN_STRONG_PATTERN_SAMPLE}+ graded decisions.")
+    lines.append(f"• Automatic threshold changes should wait for {MIN_AUTO_ADJUST_SAMPLE}+ independent decisions.")
 
     lines.append("")
     lines.append("Best Current Patterns:")
@@ -985,7 +1632,7 @@ def generate_daily_learning_report(report_date=None):
     for note in build_actionable_recommendations(graded):
         lines.append(f"• {note}")
     lines.append("")
-    lines.append("Use one-day notes as coaching, not proof. Make threshold changes after repeat patterns show over 50+ graded strikes.")
+    lines.append("Use one-day notes as coaching, not proof. Make threshold changes only after repeat patterns show enough independent decisions.")
     post_tracking_event("daily_learning_report", {"date": report_date, "text": "\n".join(lines)})
     return "\n".join(lines)
 
@@ -1361,56 +2008,289 @@ def strike_key(info, side):
 
 def should_allow_strike(state, info, opportunity):
     """
-    Duplicate strike lock:
-    - First STRIKE for game/side is allowed.
-    - Re-alert only if line/projection/confirmation materially improves.
-    This reduces repeat SMS and avoids chasing the same thesis repeatedly.
+    Legacy compatibility wrapper.
+    V2.6 uses v26_final_betnow_gate() + should_alert() as the only live SMS gate.
+    Keeping this no-op prevents old call paths from reintroducing side-based duplicate logic.
     """
-    if not ENABLE_DUPLICATE_STRIKE_LOCK:
-        return True, "duplicate lock disabled"
-
-    if opportunity.get("action") != "STRIKE":
-        return True, "not a strike"
-
-    games = state.setdefault("games", {})
-    key = strike_key(info, opportunity.get("side"))
-    prior = games.get(key, {}).get("strike_lock")
-
-    if not prior:
-        return True, "first strike"
-
-    old_edge = safe_float(prior.get("edge"), 0)
-    old_proj = safe_float(prior.get("projection"), 0)
-    old_confirm = safe_int(prior.get("confirmation_score"), 0)
-
-    new_edge = safe_float(opportunity.get("edge"), 0)
-    new_proj = safe_float(opportunity.get("projection"), safe_float(opportunity.get("projected_total"), 0))
-    new_confirm = safe_int(opportunity.get("scores", {}).get("confirmation_score"), 0)
-
-    edge_improved = abs(new_edge) >= abs(old_edge) + RE_ALERT_MIN_EDGE_IMPROVEMENT
-    projection_improved = abs(new_proj - old_proj) >= RE_ALERT_MIN_PROJECTION_IMPROVEMENT
-    confirmation_improved = new_confirm >= old_confirm + RE_ALERT_MIN_CONFIRMATION_IMPROVEMENT
-
-    if edge_improved or projection_improved or confirmation_improved:
-        return True, "material improvement"
-
-    return False, "duplicate strike suppressed"
+    return True, "legacy duplicate gate bypassed by V2.6 single decision engine"
 
 
 def record_strike_lock(state, info, opportunity):
-    if not ENABLE_DUPLICATE_STRIKE_LOCK or opportunity.get("action") != "STRIKE":
+    """
+    Legacy compatibility wrapper.
+    Active thesis is recorded by record_active_thesis() after an approved BET NOW.
+    This intentionally does nothing so we do not maintain two competing lock systems.
+    """
+    return
+
+
+def game_thesis_key(info):
+    """
+    One game gets one active thesis: OVER, UNDER, or NO_PLAY.
+    This is different from the old side-based alert key and prevents the bot
+    from firing both sides of the same game as normal STRIKES.
+    """
+    return f"{today()}::{info.get('game_pk') or info.get('away','') + '@' + info.get('home','')}::THESIS"
+
+
+def inning_float(info):
+    inning = safe_float(info.get("inning"), 0)
+    state = str(info.get("inning_state") or "").lower()
+    if state.startswith("middle") or state.startswith("end"):
+        return inning + 0.5
+    return inning
+
+
+def is_bases_empty(info):
+    label = str((info.get("base_state") or {}).get("label", "")).lower()
+    return "bases empty" in label or label.strip() in ["empty", "none", ""]
+
+
+def is_inning_transition(info):
+    state = str(info.get("inning_state") or "").lower()
+    outs = safe_int(info.get("outs"), 0)
+    return outs >= 3 or state.startswith("middle") or state.startswith("end")
+
+
+def thesis_summary_text(thesis):
+    if not thesis:
+        return "none"
+    return (
+        f"{thesis.get('side')} {thesis.get('line')} | "
+        f"inning {thesis.get('inning')} | edge {thesis.get('edge')} | "
+        f"conf {thesis.get('confidence')}"
+    )
+
+
+def professional_block_reason(info, opportunity):
+    """
+    V2.5 hard filters for STRIKE accuracy.
+    Returns None if the STRIKE remains eligible.
+    Returns a readable reason when the STRIKE should be blocked.
+    """
+    if not ENABLE_PRO_ACCURACY_MODE:
+        return None
+    if not opportunity or opportunity.get("action") != "STRIKE":
+        return None
+
+    side = str(opportunity.get("side", "")).upper()
+    scores = opportunity.get("scores", {}) or {}
+    line = safe_float(opportunity.get("line"), 0)
+    edge_abs = abs(safe_float(opportunity.get("edge"), 0))
+    inning = safe_int(info.get("inning"), 0)
+    outs = safe_int(info.get("outs"), 0)
+
+    conf = safe_int(scores.get("confirmation_score"), safe_int(opportunity.get("confidence"), 0))
+    proj = safe_int(scores.get("projection_score"), 0)
+    p2r = safe_int(scores.get("pressure_to_runs"), 0)
+    conv = safe_int(scores.get("run_conversion"), 0)
+    contact = safe_int(scores.get("contact_quality"), 0)
+    tconv = safe_int(scores.get("traffic_conversion"), 0)
+    k_env = safe_int(scores.get("strikeout_environment"), 0)
+    bp = safe_int(scores.get("bullpen_lockdown"), 0)
+
+    if side == "OVER":
+        if BLOCK_OVER_ON_THREE_OUTS and outs >= 3:
+            return "blocked: OVER at 3 outs / inning already closed"
+        if BLOCK_OVER_AT_INNING_TRANSITION and is_bases_empty(info) and is_inning_transition(info):
+            return "blocked: OVER at inning transition with bases empty"
+        if BLOCK_CONTACT_ONLY_OVER and contact >= 70 and p2r < MIN_CONTACT_ONLY_P2R and tconv < MIN_CONTACT_ONLY_TRAFFIC_CONV:
+            return "blocked: contact-only OVER without enough pressure-to-runs/traffic conversion"
+        if line >= MAX_EXTREME_TOTAL_STRIKE_LINE:
+            elite = (
+                edge_abs >= MIN_EXTREME_TOTAL_EDGE_V25
+                and conf >= MIN_EXTREME_TOTAL_CONFIRMATION_V25
+                and proj >= MIN_EXTREME_TOTAL_PROJECTION_V25
+                and p2r >= MIN_EXTREME_TOTAL_P2R_V25
+                and conv >= MIN_EXTREME_TOTAL_CONV_V25
+            )
+            if not elite:
+                return "blocked: extreme live OVER total without elite confirmation"
+
+    if side == "UNDER":
+        if inning < MIN_EARLY_UNDER_INNING:
+            elite_early_under = (
+                edge_abs >= MIN_EARLY_UNDER_EDGE
+                and k_env >= MIN_EARLY_UNDER_K_ENV
+                and bp >= MIN_EARLY_UNDER_BULPEN_LOCK
+                and contact <= MAX_EARLY_UNDER_CONTACT
+                and p2r <= MAX_EARLY_UNDER_P2R
+            )
+            if not elite_early_under:
+                return "blocked: early UNDER without elite K/bullpen/dead-contact profile"
+        if k_env < 50 and bp < 45 and safe_int(scores.get("run_prevention"), 0) < 70:
+            return "blocked: UNDER lacks K environment, bullpen lockdown, and run-prevention support"
+
+    return None
+
+
+def reversal_allowed(state_game, info, opportunity):
+    """
+    Opposite-side STRIKES are blocked unless this is a true thesis reversal.
+    The reversal text is deliberately labeled so the user knows the recommendation changed.
+    """
+    if not ENABLE_SHIFT_REVERSAL:
+        return False, "reversal disabled"
+
+    thesis = state_game.get("active_thesis")
+    if not thesis:
+        return False, "no prior thesis"
+    old_side = str(thesis.get("side", "")).upper()
+    new_side = str(opportunity.get("side", "")).upper()
+    if not old_side or old_side == new_side:
+        return False, "not opposite side"
+
+    scores = opportunity.get("scores", {}) or {}
+    innings_passed = inning_float(info) - safe_float(thesis.get("inning_float"), safe_float(thesis.get("inning"), 0))
+    conf = safe_int(opportunity.get("confidence"), 0)
+    edge_abs = abs(safe_float(opportunity.get("edge"), 0))
+    proj_score = safe_int(scores.get("projection_score"), 0)
+    confirm_score = safe_int(scores.get("confirmation_score"), 0)
+
+    ok = (
+        innings_passed >= MIN_REVERSAL_INNINGS_PASSED
+        and conf >= MIN_REVERSAL_CONFIDENCE
+        and edge_abs >= MIN_REVERSAL_EDGE
+        and proj_score >= MIN_REVERSAL_PROJECTION_SCORE
+        and confirm_score >= MIN_REVERSAL_CONFIRMATION_SCORE
+    )
+    if ok:
+        return True, "true reversal"
+    return False, (
+        f"opposite thesis blocked: prior {thesis_summary_text(thesis)}; "
+        f"new {new_side} needs stronger reversal proof"
+    )
+
+
+def update_current_recommendation(state_game, info, market_context, opportunity=None, status="NO PLAY", reason=""):
+    """
+    This is for login/dashboard/current-feed status.
+    SMS remains BET NOW only, but the state always carries the current recommendation.
+    """
+    if not ENABLE_CURRENT_RECOMMENDATION_STATE:
         return
 
-    games = state.setdefault("games", {})
-    key = strike_key(info, opportunity.get("side"))
-    games.setdefault(key, {})
-    games[key]["strike_lock"] = {
-        "time": now_local().isoformat(),
-        "side": opportunity.get("side"),
+    rec = {
+        "updated_at": now_local().isoformat(),
+        "status": status,
+        "reason": reason,
+        "score": score_text(info),
+        "inning": info.get("inning"),
+        "inning_state": info.get("inning_state"),
+        "base_out": f"{(info.get('base_state') or {}).get('label', '')}, {info.get('outs')} out(s)",
+        "opening_total": (market_context or {}).get("opening_total"),
+        "live_total": (market_context or {}).get("live_total"),
+        "consensus_total": (market_context or {}).get("consensus_total"),
+        "best_available_total": (market_context or {}).get("best_available_total"),
+        "best_book": (market_context or {}).get("best_book"),
+        "recommended_book": (market_context or {}).get("recommended_book"),
+        "recommended_total": (market_context or {}).get("recommended_total"),
+        "recommended_price": (market_context or {}).get("recommended_price"),
+        "market_confirmation": (market_context or {}).get("market_confirmation_score"),
+        "line_velocity": (market_context or {}).get("line_velocity"),
+        "book_velocity_summary": (market_context or {}).get("book_velocity_summary"),
+        "leading_book": (market_context or {}).get("leading_book"),
+        "best_line_age_seconds": (market_context or {}).get("best_line_age_seconds"),
+        "market_disagreement": (market_context or {}).get("market_disagreement"),
+    }
+
+    if opportunity:
+        scores = opportunity.get("scores", {}) or {}
+        rec.update({
+            "side": opportunity.get("side"),
+            "line": opportunity.get("line"),
+            "price": opportunity.get("price"),
+            "projected_total": opportunity.get("projected_total") or opportunity.get("projection"),
+            "edge": opportunity.get("edge"),
+            "confidence": opportunity.get("confidence"),
+            "model_probability": opportunity.get("model_probability"),
+            "break_even_probability": opportunity.get("break_even_probability"),
+            "expected_value": opportunity.get("expected_value"),
+            "max_entry_line": opportunity.get("max_entry_line") or max_entry_line_for(opportunity),
+            "max_entry_price": opportunity.get("max_entry_price") or max_entry_price_for(opportunity.get("side")),
+            "app_status": opportunity.get("app_status"),
+            "scenario": clean_scenario_label(opportunity.get("scenario", "")),
+            "expires_if": expiration_text(info, opportunity),
+            "stress": scores.get("pitcher_stress"),
+            "contact": scores.get("contact_quality"),
+            "p2r": scores.get("pressure_to_runs"),
+            "conv": scores.get("run_conversion"),
+            "k_env": scores.get("strikeout_environment"),
+            "bullpen_lockdown": scores.get("bullpen_lockdown"),
+        })
+
+    state_game["current_recommendation"] = rec
+
+
+def expiration_text(info, opportunity):
+    side = str((opportunity or {}).get("side", "")).upper()
+    line = safe_float((opportunity or {}).get("line"), 0)
+    max_entry = (opportunity or {}).get("max_entry_line") or max_entry_line_for(opportunity)
+    if side == "OVER":
+        return f"line rises above {max_entry if max_entry is not None else line + 0.5:.1f}, inning ends, bases clear, or signal drops"
+    if side == "UNDER":
+        return f"line falls below {max_entry if max_entry is not None else line - 0.5:.1f}, traffic appears, bullpen stress rises, or signal drops"
+    return "signal changes"
+
+
+def apply_professional_decision_layer(state_game, info, market_context, opportunity):
+    """
+    V2.6 professional decision layer.
+    The scoring engine can produce candidates, but only this layer can approve BET NOW SMS.
+    """
+    if not opportunity:
+        update_current_recommendation(state_game, info, market_context, None, "NO PLAY", "no qualifying opportunity")
+        return None, "no opportunity"
+
+    if opportunity.get("action") != "STRIKE":
+        update_current_recommendation(state_game, info, market_context, opportunity, "HOLD", "watch-level only; SMS disabled")
+        return None, "watch only"
+
+    # V3.2: before the final gate, rewrite the candidate to the best practical app line.
+    opportunity = apply_price_adjusted_best_line(info, market_context, opportunity)
+    market_context["recommended_book"] = opportunity.get("recommended_book") or market_context.get("recommended_book")
+    market_context["recommended_total"] = opportunity.get("recommended_total") or opportunity.get("line")
+    market_context["recommended_price"] = opportunity.get("recommended_price") or opportunity.get("price")
+    market_context["app_status"] = opportunity.get("app_status") or recommended_app_status(opportunity, market_context)
+    if opportunity.get("action") == "NO_PLAY":
+        update_current_recommendation(state_game, info, market_context, opportunity, "NO BET", opportunity.get("app_status", "best-line rewrite blocked"))
+        return None, opportunity.get("app_status", "best-line rewrite blocked")
+
+    approved, reason = v26_final_betnow_gate(state_game, info, market_context, opportunity)
+    if not approved:
+        update_current_recommendation(state_game, info, market_context, opportunity, "HOLD", reason)
+        print(f"V2.6 BLOCK | {info.get('away')} at {info.get('home')} | {reason}")
+        return None, reason
+
+    status = "BET NOW - REVERSAL" if opportunity.get("reversal") else "BET NOW"
+    update_current_recommendation(state_game, info, market_context, opportunity, status, reason)
+    return opportunity, reason
+
+
+def record_active_thesis(state_game, info, opportunity):
+    """
+    Record the actual recommendation thesis after a BET NOW SMS is sent.
+    This drives opposite-side protection and clean login status.
+    """
+    if not opportunity or opportunity.get("action") != "STRIKE":
+        return
+
+    prior = state_game.get("active_thesis")
+    state_game["prior_thesis"] = prior if opportunity.get("reversal") else state_game.get("prior_thesis")
+    state_game["active_thesis"] = {
+        "side": str(opportunity.get("side", "")).upper(),
         "line": opportunity.get("line"),
+        "price": opportunity.get("price"),
         "edge": opportunity.get("edge"),
-        "projection": opportunity.get("projection", opportunity.get("projected_total")),
-        "confirmation_score": opportunity.get("scores", {}).get("confirmation_score"),
+        "projection": opportunity.get("projected_total") or opportunity.get("projection"),
+        "confidence": opportunity.get("confidence"),
+        "inning": info.get("inning"),
+        "inning_float": inning_float(info),
+        "score": score_text(info),
+        "base_out": f"{(info.get('base_state') or {}).get('label', '')}, {info.get('outs')} out(s)",
+        "scenario": clean_scenario_label(opportunity.get("scenario", "")),
+        "sent_at": now_local().isoformat(),
+        "reversal": bool(opportunity.get("reversal")),
     }
 
 
@@ -1472,6 +2352,43 @@ def log_strike_history(info, opportunity, market_context=None):
         "under_suppression_score": master_score_from_scores("UNDER", scores),
         "market_value_score": master_market_value_score(opportunity, scores),
         "risk_filter_score": master_risk_filter_score(opportunity, info, scores),
+        "consensus_total": market_context.get("consensus_total"),
+        "market_min_total": market_context.get("market_min_total"),
+        "market_max_total": market_context.get("market_max_total"),
+        "market_disagreement": market_context.get("market_disagreement"),
+        "line_velocity": market_context.get("line_velocity"),
+        "line_direction": market_context.get("line_direction"),
+        "primary_book": market_context.get("primary_book"),
+        "best_book": market_context.get("best_book"),
+        "best_available_total": market_context.get("best_available_total"),
+        "best_available_price": market_context.get("best_available_price"),
+        "price_adjusted_best_book": market_context.get("price_adjusted_best_book"),
+        "price_adjusted_best_total": market_context.get("price_adjusted_best_total"),
+        "price_adjusted_best_price": market_context.get("price_adjusted_best_price"),
+        "market_confirmation_score": market_context.get("market_confirmation_score"),
+        "book_count": market_context.get("book_count"),
+        "first_seen_total": market_context.get("first_seen_total") or market_context.get("opening_total"),
+        "true_opening_total": market_context.get("true_opening_total"),
+        "recommended_book": opportunity.get("recommended_book") or market_context.get("recommended_book"),
+        "recommended_total": opportunity.get("recommended_total") or opportunity.get("line"),
+        "recommended_price": opportunity.get("recommended_price") or opportunity.get("price"),
+        "best_line_age_seconds": market_context.get("best_line_age_seconds"),
+        "best_line_last_update": market_context.get("best_line_last_update"),
+        "book_velocity_summary": market_context.get("book_velocity_summary"),
+        "leading_book": market_context.get("leading_book"),
+        "model_probability": opportunity.get("model_probability"),
+        "break_even_probability": opportunity.get("break_even_probability"),
+        "expected_value": opportunity.get("expected_value"),
+        "app_status": opportunity.get("app_status") or market_context.get("app_status"),
+        "max_entry_line": opportunity.get("max_entry_line") or max_entry_line_for(opportunity),
+        "max_entry_price": opportunity.get("max_entry_price") or max_entry_price_for(opportunity.get("side")),
+        "bet_quality": opportunity.get("bet_quality"),
+        "quality_reason": opportunity.get("quality_reason"),
+        "lineup_pressure_score": lineup_pocket_score(info),
+        "bullpen_context_score": bullpen_context_score(info, scores),
+        "confidence_decay_score": opportunity.get("confidence_decay_score"),
+        "probability_source": opportunity.get("probability_source"),
+        "leading_book_score": leading_book_score(opportunity.get("side"), {"leading_book": market_context.get("leading_book"), "book_velocities": {}}),
         "scenario": opportunity.get("scenario"),
         "action": opportunity.get("action"),
         "final_score": "",
@@ -1480,6 +2397,9 @@ def log_strike_history(info, opportunity, market_context=None):
         "graded_at": "",
     }
     row["pattern_tags"] = "|".join(pattern_tags_from_row(row))
+    bq, qr = classify_bet_quality(row)
+    row["bet_quality"] = bq
+    row["quality_reason"] = qr
 
     csv_append_once(STRIKE_HISTORY_FILE, strike_fieldnames(), row)
     post_tracking_event("strike_stored", row)
@@ -1624,6 +2544,243 @@ def save_state(state):
 
 
 
+
+def v26_signal_snapshot(info, opportunity):
+    """Return the core scores used by the final decision engine."""
+    scores = (opportunity or {}).get("scores", {}) or {}
+    side = str((opportunity or {}).get("side", "")).upper()
+    return {
+        "side": side,
+        "line": safe_float((opportunity or {}).get("line"), 0),
+        "edge": abs(safe_float((opportunity or {}).get("edge"), 0)),
+        "confidence": safe_int((opportunity or {}).get("confidence"), safe_int(scores.get("confirmation_score"), 0)),
+        "projection_score": safe_int(scores.get("projection_score"), 0),
+        "confirmation_score": safe_int(scores.get("confirmation_score"), 0),
+        "p2r": safe_int(scores.get("pressure_to_runs"), 0),
+        "conv": safe_int(scores.get("run_conversion"), 0),
+        "stress": safe_int(scores.get("pitcher_stress"), 0),
+        "contact": safe_int(scores.get("contact_quality"), 0),
+        "k_env": safe_int(scores.get("strikeout_environment"), 0),
+        "bp_lock": safe_int(scores.get("bullpen_lockdown"), 0),
+        "traffic_conv": safe_int(scores.get("traffic_conversion"), 0),
+        "hh_eff": safe_int(scores.get("hard_hit_efficiency"), 0),
+        "value": master_market_value_score(opportunity or {}, scores),
+        "risk": master_risk_filter_score(opportunity or {}, info or {}, scores),
+    }
+
+
+def market_chase_block_reason(info, market_context, opportunity):
+    """
+    V3.1 do-not-chase protection.
+    If the live total already moved heavily from the opener in the same direction
+    as the proposed bet, require elite baseball edge and elite market confirmation.
+    """
+    if not ENABLE_MARKET_INTELLIGENCE or not opportunity:
+        return None
+    side = str(opportunity.get("side", "")).upper()
+    opening = safe_float((market_context or {}).get("opening_total"), None)
+    live = safe_float((market_context or {}).get("live_total"), None)
+    if opening is None or live is None:
+        return None
+    move = live - opening
+    chase = (side == "OVER" and move >= DO_NOT_CHASE_MOVE_FROM_OPEN) or (side == "UNDER" and move <= -DO_NOT_CHASE_MOVE_FROM_OPEN)
+    if not chase:
+        return None
+    scores = (opportunity or {}).get("scores", {}) or {}
+    confidence = safe_int(opportunity.get("confidence"), 0)
+    edge = abs(safe_float(opportunity.get("edge"), 0))
+    market_conf = safe_int((market_context or {}).get("market_confirmation_score"), 50)
+    projection = safe_int(scores.get("projection_score"), 0)
+    confirmation = safe_int(scores.get("confirmation_score"), 0)
+    elite = (
+        confidence >= DO_NOT_CHASE_MIN_CONFIDENCE
+        and edge >= DO_NOT_CHASE_MIN_EDGE
+        and market_conf >= DO_NOT_CHASE_MIN_MARKET_CONFIRMATION
+        and projection >= 85
+        and confirmation >= 85
+    )
+    if not elite:
+        return f"do-not-chase: live total moved {move:+.1f} from open; elite confirmation required"
+    return None
+
+
+def v26_final_betnow_gate(state_game, info, market_context, opportunity):
+    """
+    The one clean final gate for SMS.
+    The model can still create candidates, but this function decides whether a text is allowed.
+    """
+    if not ENABLE_V26_SINGLE_DECISION_ENGINE:
+        return True, "legacy engine enabled"
+
+    if not opportunity or opportunity.get("action") != "STRIKE":
+        return False, "no BET NOW candidate"
+
+    if V26_REJECT_STALE_STATUS and str(info.get("status", "")).lower() != "live":
+        return False, "game is not live"
+
+    market_first_block = v33_market_first_block_reason(info, market_context, opportunity)
+    if market_first_block:
+        return False, market_first_block
+
+    baseball_quality_block = v33_baseball_quality_block_reason(info, opportunity)
+    if baseball_quality_block:
+        return False, baseball_quality_block
+
+    decay = confidence_decay_score(state_game, info, opportunity)
+    opportunity["confidence_decay_score"] = decay
+    if decay >= CONFIDENCE_DECAY_BLOCK_LEVEL:
+        return False, f"confidence-decay block: stale setup risk {decay}"
+
+    block = professional_block_reason(info, opportunity)
+    if block:
+        return False, block
+
+    chase_block = market_chase_block_reason(info, market_context, opportunity)
+    if chase_block:
+        return False, chase_block
+
+    # V3.2 app-practical gates: price, stale best line, and expected value.
+    if not price_ok(opportunity.get("price"), abs(safe_float(opportunity.get("edge"), 0))):
+        return False, "price not playable in app range"
+    age = safe_float((market_context or {}).get("best_line_age_seconds"), None)
+    if age is not None and age > MAX_BEST_LINE_AGE_SECONDS:
+        return False, f"best app line is stale ({int(age)}s old)"
+    ev_info = expected_value_per_unit(opportunity.get("side"), opportunity.get("edge"), opportunity.get("price"))
+    opportunity.update(ev_info)
+    if REQUIRE_POSITIVE_EV and ev_info.get("expected_value") is not None and ev_info.get("expected_value") < MIN_EXPECTED_VALUE:
+        return False, f"EV {ev_info.get('expected_value'):+.3f} below minimum {MIN_EXPECTED_VALUE:+.3f}"
+
+    snap = v26_signal_snapshot(info, opportunity)
+    if snap["confidence"] < V26_MIN_BETNOW_CONFIDENCE:
+        return False, f"confidence {snap['confidence']} below V2.6 minimum {V26_MIN_BETNOW_CONFIDENCE}"
+    if snap["edge"] < V26_MIN_BETNOW_EDGE:
+        return False, f"edge {snap['edge']} below V2.6 minimum {V26_MIN_BETNOW_EDGE}"
+    if snap["value"] < V26_MIN_VALUE_SCORE:
+        return False, f"value score {snap['value']} below V2.6 minimum {V26_MIN_VALUE_SCORE}"
+    max_risk = V26_EXTREME_MAX_RISK_SCORE if snap["line"] >= MAX_EXTREME_TOTAL_STRIKE_LINE else V26_MAX_RISK_SCORE
+    if snap["risk"] > max_risk:
+        return False, f"risk score {snap['risk']} exceeds V2.6 max {max_risk}"
+
+    if ENABLE_MARKET_INTELLIGENCE and REQUIRE_MARKET_CONFIRMATION_WHEN_AVAILABLE:
+        book_count = safe_int((market_context or {}).get("book_count"), 0)
+        market_conf = safe_int((market_context or {}).get("market_confirmation_score"), 50)
+        if book_count >= MIN_MARKET_BOOKS_FOR_CONFIRMATION:
+            min_market = MIN_MARKET_CONFIRMATION_EXTREME if snap["line"] >= MAX_EXTREME_TOTAL_STRIKE_LINE else MIN_MARKET_CONFIRMATION_SCORE
+            if market_conf < min_market:
+                return False, f"market confirmation {market_conf} below required {min_market}"
+
+    thesis = state_game.get("active_thesis") or {}
+    old_side = str(thesis.get("side", "")).upper()
+    new_side = snap["side"]
+
+    sent_strikes = [a for a in state_game.get("alerts", []) if a.get("action") == "STRIKE"]
+    if V26_ONE_BET_NOW_PER_GAME and sent_strikes and not opportunity.get("reversal"):
+        if old_side and old_side != new_side and V26_ALLOW_REVERSAL_ONLY:
+            ok, reason = reversal_allowed(state_game, info, opportunity)
+            if not ok:
+                return False, reason
+            opportunity["reversal"] = True
+            opportunity["previous_thesis"] = dict(thesis)
+            return True, "approved V2.6 thesis reversal"
+        return False, "one BET NOW already sent for this game"
+
+    if old_side and old_side != new_side and V26_ALLOW_REVERSAL_ONLY:
+        ok, reason = reversal_allowed(state_game, info, opportunity)
+        if not ok:
+            return False, reason
+        opportunity["reversal"] = True
+        opportunity["previous_thesis"] = dict(thesis)
+        return True, "approved V2.6 thesis reversal"
+
+    return True, "approved V2.6 BET NOW"
+
+
+def format_bet_now_sms(label, info, market_context, opportunity):
+    """
+    Build the SMS directly from live objects instead of parsing the long alert text.
+    This is safer and makes the recommendation clear at login/SMS time.
+    """
+    scores = (opportunity or {}).get("scores", {}) or {}
+    side = str(opportunity.get("side", "")).upper()
+    line = opportunity.get("line")
+    price = opportunity.get("price")
+    price_text = price if price is not None else "N/A"
+    proj = opportunity.get("projected_total") or opportunity.get("projection")
+    edge = safe_float(opportunity.get("edge"), 0)
+    edge_sign = "+" if edge > 0 else ""
+    title = "🔄 SHIFT REVERSAL — BET NOW" if opportunity.get("reversal") else "🚨 SHIFT STRIKE — BET NOW"
+
+    signal_parts = []
+    if side == "OVER":
+        for key, label_name in [
+            ("pitcher_stress", "Stress"),
+            ("pressure_to_runs", "P2R"),
+            ("run_conversion", "Conv"),
+            ("traffic_conversion", "Traffic"),
+            ("market_lag", "Lag"),
+        ]:
+            val = safe_int(scores.get(key), 0)
+            if val:
+                signal_parts.append(f"{label_name} {val}/100")
+    else:
+        for key, label_name in [
+            ("run_prevention", "Prev"),
+            ("strikeout_environment", "KEnv"),
+            ("bullpen_lockdown", "BPLock"),
+            ("hard_hit_under_support", "HHUnder"),
+            ("under_environment", "UnderEnv"),
+        ]:
+            val = safe_int(scores.get(key), 0)
+            if val:
+                signal_parts.append(f"{label_name} {val}/100")
+
+    base_label = (info.get("base_state") or {}).get("label", "")
+    prev = opportunity.get("previous_thesis") or {}
+    app_status = opportunity.get("app_status") or market_context.get("app_status") or recommended_app_status(opportunity, market_context)
+    ev = opportunity.get("expected_value")
+    mp = opportunity.get("model_probability")
+    bp = opportunity.get("break_even_probability")
+    prob_src = opportunity.get("probability_source")
+    lineup_score = lineup_pocket_score(info)
+    bullpen_score = bullpen_context_score(info, scores)
+    decay_score = opportunity.get("confidence_decay_score")
+    book = opportunity.get("recommended_book") or market_context.get("recommended_book") or market_context.get("price_adjusted_best_book") or market_context.get("best_book") or "Best app"
+    first_seen = market_context.get("first_seen_total") or market_context.get("opening_total")
+    true_open = market_context.get("true_opening_total") or "unknown"
+    age = market_context.get("best_line_age_seconds")
+    age_text = f" | Age {age}s" if age is not None else ""
+    max_entry = opportunity.get("max_entry_line") or max_entry_line_for(opportunity)
+    max_price = opportunity.get("max_entry_price") or max_entry_price_for(side)
+    leading = market_context.get("leading_book")
+    leading_text = f" | Lead {leading}" if leading else ""
+    lines = [
+        title,
+        label,
+        "",
+        f"APP STATUS: {app_status}",
+        f"PLAY: {side} {line} ({price_text}) at {book}",
+        f"MAX ENTRY: {side} {max_entry} or better | Max price {max_price}",
+        f"FirstSeen/TrueOpen/Live/Proj: {first_seen}/{true_open}/{market_context.get('live_total')}/{proj}",
+        f"Market: Cons {market_context.get('consensus_total')} | Vel {market_context.get('line_velocity')}{leading_text} | MktConf {market_context.get('market_confirmation_score')}{age_text}",
+        f"EV: {ev if ev is not None else 'N/A'} | Model {mp if mp is not None else 'N/A'} | BE {bp if bp is not None else 'N/A'}",
+        f"Intel: Lineup {lineup_score}/100 | BullpenRisk {bullpen_score}/100 | Decay {decay_score if decay_score is not None else 0}/100 | Prob {prob_src or 'formula'}",
+        f"Edge: {edge_sign}{edge} runs | Conf: {opportunity.get('confidence', 'N/A')}/100",
+        f"Score: {info.get('away_runs')}-{info.get('home_runs')} | {info.get('inning_state')} {info.get('inning')}",
+        f"Base/Out: {base_label}, {info.get('outs')} out(s)",
+    ]
+    if prev:
+        lines.append(f"Previous: {prev.get('side')} {prev.get('line')} at inning {prev.get('inning')}")
+    if signal_parts:
+        lines.append("Signals: " + " | ".join(signal_parts[:4]))
+    lines.append("Expires if: " + expiration_text(info, opportunity))
+    lines.append("")
+    lines.append("BET NOW")
+    text = "\n".join(lines)
+    if len(text) > MAX_SHORT_SMS_CHARS:
+        text = text[:MAX_SHORT_SMS_CHARS - 20].rstrip() + "\n[Trimmed]"
+    return text
+
+
 def compact_sms_message(msg, max_chars=MAX_SMS_CHARS):
     """
     Twilio hard rejects long message bodies.
@@ -1706,11 +2863,20 @@ def compact_sms_message(msg, max_chars=MAX_SMS_CHARS):
 
 
 def alert_action_from_message(msg):
+    """
+    Technical SMS classifier only.
+    Reversals are BET NOW recommendations even if the first line does not contain the word STRIKE.
+    """
     first_line = (msg.splitlines()[0] if msg else "").upper()
-    if "STRIKE" in first_line:
-        return "STRIKE"
+    body = (msg or "").upper()
     if "WATCH" in first_line:
         return "WATCH"
+    if "SHIFT REVERSAL" in first_line and "BET NOW" in body:
+        return "STRIKE"
+    if "STRIKE" in first_line and "BET NOW" in body:
+        return "STRIKE"
+    if "BET NOW" in first_line:
+        return "STRIKE"
     return "UNKNOWN"
 
 
@@ -1737,153 +2903,61 @@ def first_nonempty_after_label(msg, label):
 
 def compact_strike_sms(msg):
     """
-    Short betting text only. Full alert remains in Railway logs.
+    Safe fallback only.
+    V2.6 approved SMS should come from format_bet_now_sms(label, info, market_context, opportunity),
+    not from parsing the long Railway alert. This fallback avoids runtime errors if an older path calls it.
     """
-    if not SHORT_STRIKE_SMS:
-        return compact_sms_message(msg, MAX_SHORT_SMS_CHARS)
-
+    if not msg:
+        return ""
     lines = [ln.strip() for ln in msg.splitlines() if ln.strip()]
-    header = lines[0] if lines else "SHIFT MLB STRIKE"
+    header = lines[0] if lines else "🚨 SHIFT STRIKE — BET NOW"
     matchup = lines[1] if len(lines) > 1 else ""
-
-    play = first_nonempty_after_label(msg, "PLAY:")
-    if not play:
-        side = extract_alert_value(msg, "Side")
-        line = extract_alert_value(msg, "Live Line")
-        play = f"{side} {line}".strip()
-
+    play = first_nonempty_after_label(msg, "PLAY:") or extract_alert_value(msg, "Live Line")
     score = extract_alert_value(msg, "Score")
     inning = extract_alert_value(msg, "Inning")
     base_out = extract_alert_value(msg, "Base/Out")
     proj = extract_alert_value(msg, "Proj")
     edge = extract_alert_value(msg, "Edge")
-    projection = extract_alert_value(msg, "Projection Score")
-    confirmation = extract_alert_value(msg, "Confirmation Score")
-    need = extract_alert_value(msg, "Need Runs")
-    action_window = extract_alert_value(msg, "Action Window")
-    historical = extract_alert_value(msg, "Historical Match")
 
-    # Key metrics
-    stress = extract_alert_value(msg, "Stress")
-    contact = extract_alert_value(msg, "Contact")
-    p2r = extract_alert_value(msg, "P2R")
-    conv = extract_alert_value(msg, "Conv")
-    prev = extract_alert_value(msg, "Prev")
-    pred = extract_alert_value(msg, "PredMove")
-    threat = extract_alert_value(msg, "Threat")
-    stack = extract_alert_value(msg, "Stack")
-    lag = extract_alert_value(msg, "Lag")
-    k_env = extract_alert_value(msg, "KEnv")
-    bp_lock = extract_alert_value(msg, "BPLock")
-    tconv = extract_alert_value(msg, "TConv")
-    hheff = extract_alert_value(msg, "HHEff")
-
-    # Elite label
-    try:
-        edge_num = float(edge.replace("+", "").replace("runs", "").strip().split()[0])
-    except Exception:
-        edge_num = 0.0
-    try:
-        proj_score = int(projection.split("/")[0])
-    except Exception:
-        proj_score = 0
-    try:
-        conf_score = int(confirmation.split("/")[0])
-    except Exception:
-        conf_score = 0
-
-    elite = (
-        abs(edge_num) >= ELITE_STRIKE_EDGE
-        and proj_score >= ELITE_STRIKE_PROJECTION
-        and conf_score >= ELITE_STRIKE_CONFIRMATION
-    )
-
-    title = "🔥 ELITE MLB STRIKE" if elite else "🚨 MLB STRIKE"
-
-    compact = [
-        title,
-        matchup,
-        "",
-        play,
-    ]
-
+    compact = [header, matchup, ""]
+    if play:
+        compact.append(f"PLAY: {play}")
     if proj or edge:
-        compact.append(f"Proj: {proj} | Edge: {edge}")
-    if projection or confirmation:
-        compact.append(f"ProjScore: {projection} | Confirm: {confirmation}")
+        compact.append(f"Proj: {proj} | Edge: {edge}".strip())
     if score or inning:
-        compact.append(f"Score: {score} | {inning}")
+        compact.append(f"Score: {score} | {inning}".strip())
     if base_out:
         compact.append(f"Base/Out: {base_out}")
-    if need:
-        compact.append(need)
-    if action_window:
-        compact.append(action_window)
-    if historical:
-        compact.append(f"Hist: {historical}")
-
-    reason_bits = []
-    if stress:
-        reason_bits.append(f"Stress {stress}")
-    if contact:
-        reason_bits.append(f"Contact {contact}")
-    if p2r:
-        reason_bits.append(f"P2R {p2r}")
-    if conv:
-        reason_bits.append(f"Conv {conv}")
-    if prev:
-        reason_bits.append(f"Prev {prev}")
-    if pred:
-        reason_bits.append(f"Pred {pred}")
-    if threat:
-        reason_bits.append(f"Threat {threat}")
-    if stack:
-        reason_bits.append(f"Stack {stack}")
-    if lag:
-        reason_bits.append(f"Lag {lag}")
-    if k_env:
-        reason_bits.append(f"KEnv {k_env}")
-    if bp_lock:
-        reason_bits.append(f"BPLock {bp_lock}")
-    if tconv:
-        reason_bits.append(f"TConv {tconv}")
-    if hheff:
-        reason_bits.append(f"HHEff {hheff}")
-
-    if reason_bits:
-        compact.extend(["", "Signals: " + " | ".join(reason_bits[:4])])
-
-    compact.append("")
-    compact.append("BET NOW")
-
-    text = "\n".join(compact)
-
+    compact.extend(["", "BET NOW"])
+    text = "\n".join([ln for ln in compact if ln is not None])
     if len(text) > MAX_SHORT_SMS_CHARS:
         text = text[:MAX_SHORT_SMS_CHARS - 20].rstrip() + "\n[Trimmed]"
-
     return text
 
 
-def should_send_sms(msg):
+def should_send_sms(msg, sms_body=None):
     """
-    Watches are intentionally not sent by SMS.
-    They still appear in Railway logs.
+    Final technical send guard.
+    The betting decision already happened in v26_final_betnow_gate().
+    If an approved V2.6 sms_body is supplied, allow both STRIKE and SHIFT REVERSAL texts.
     """
     if not SEND_ONLY_STRIKE_SMS:
         return True
-    return alert_action_from_message(msg) == "STRIKE"
+    body = (sms_body or msg or "").upper()
+    if "WATCH" in (msg.splitlines()[0].upper() if msg else ""):
+        return False
+    return "BET NOW" in body and ("STRIKE" in body or "SHIFT REVERSAL" in body or "PLAY:" in body)
 
 
-def send_text(msg):
+def send_text(msg, sms_body=None):
     # Full alert always stays in Railway logs.
     print("\n" + msg + "\n")
 
-    # WATCH alerts stay in logs only. STRIKE alerts go to SMS.
-    if not should_send_sms(msg):
-        print("TEXT NOT SENT: WATCH alert logged only.")
+    if not should_send_sms(msg, sms_body=sms_body):
+        print("TEXT NOT SENT: non-BET NOW alert logged only.")
         return
 
-    sms_body = compact_strike_sms(msg)
+    sms_body = sms_body or compact_strike_sms(msg)
     if len(sms_body) > MAX_SHORT_SMS_CHARS:
         sms_body = sms_body[:MAX_SHORT_SMS_CHARS - 40].rstrip() + "\n[Trimmed]"
 
@@ -1900,9 +2974,41 @@ def send_text(msg):
         print("TEXT ERROR:", repr(e))
 
 
+def realtime_data_status():
+    return {
+        "live_game_provider": LIVE_GAME_PROVIDER,
+        "odds_provider": ODDS_PROVIDER,
+        "premium_data_provider": PREMIUM_DATA_PROVIDER,
+        "mlb_stats_api_enabled": ENABLE_MLB_STATS_API_CONTEXT,
+        "sportsdataio_configured": bool(SPORTSDATAIO_KEY),
+        "opticodds_configured": bool(OPTICODDS_KEY),
+        "sportradar_configured": bool(SPORTRADAR_KEY),
+    }
+
+
 def get_schedule():
-    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={today()}"
-    data = requests.get(url, timeout=15).json()
+    """
+    V3.5 live-game adapter. Default source is MLB Stats API.
+    This endpoint requires no API key and supplies the daily MLB slate, status, start time, and final scores.
+    """
+    if LIVE_GAME_PROVIDER not in ["mlb_stats_api", "mlb", "statsapi"]:
+        print(f"LIVE GAME PROVIDER '{LIVE_GAME_PROVIDER}' not implemented; falling back to MLB Stats API.")
+
+    if not ENABLE_MLB_STATS_API_CONTEXT:
+        print("MLB STATS API CONTEXT DISABLED")
+        return []
+
+    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={today()}&hydrate=probablePitcher,team"
+    try:
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200:
+            print("MLB SCHEDULE API ERROR:", r.status_code, r.text[:200])
+            return []
+        data = r.json()
+    except Exception as e:
+        print("MLB SCHEDULE API EXCEPTION:", repr(e))
+        return []
+
     games = []
     for d in data.get("dates", []):
         games.extend(d.get("games", []))
@@ -1910,8 +3016,22 @@ def get_schedule():
 
 
 def get_feed(game_pk):
+    """
+    V3.5 live feed adapter. Pulls MLB Stats API live feed for real-time baseball context:
+    inning, score, outs, base state, current batter, pitcher, lineups, boxscore, and play-by-play.
+    """
+    if not ENABLE_MLB_STATS_API_CONTEXT:
+        return {}
     url = f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
-    return requests.get(url, timeout=15).json()
+    try:
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200:
+            print("MLB LIVE FEED API ERROR:", game_pk, r.status_code, r.text[:200])
+            return {}
+        return r.json()
+    except Exception as e:
+        print("MLB LIVE FEED API EXCEPTION:", game_pk, repr(e))
+        return {}
 
 
 def get_odds():
@@ -2048,6 +3168,30 @@ def parse_game(feed, schedule_game):
     away_runs = linescore.get("teams", {}).get("away", {}).get("runs", 0) or 0
     home_runs = linescore.get("teams", {}).get("home", {}).get("runs", 0) or 0
 
+
+    # V3.4 lineup-pocket snapshot. Uses batting order if MLB feed exposes it.
+    def _batting_order_snapshot(side):
+        try:
+            team_box = ld.get("boxscore", {}).get("teams", {}).get(side or "", {})
+            order = [str(x) for x in (team_box.get("battingOrder") or [])]
+            players = team_box.get("players", {}) or {}
+            current_id = str((matchup.get("batter") or {}).get("id") or "")
+            if not order or not current_id or current_id not in order:
+                return [], None
+            idx = order.index(current_id)
+            pocket = []
+            for offset in range(3):
+                pid = order[(idx + offset) % len(order)]
+                pdata = players.get("ID" + pid, {}) or {}
+                person = pdata.get("person", {}) or {}
+                slot = ((idx + offset) % 9) + 1
+                pocket.append({"id": pid, "name": person.get("fullName", "Unknown"), "slot": slot})
+            return pocket, ((idx % 9) + 1)
+        except Exception:
+            return [], None
+
+    next_batter_pocket, current_batter_order_slot = _batting_order_snapshot(batting_side)
+
     return {
         "game_pk": str(schedule_game.get("gamePk", "")),
         "home": home,
@@ -2067,9 +3211,15 @@ def parse_game(feed, schedule_game):
         "current_batter_id": matchup.get("batter", {}).get("id"),
         "current_batter_name": matchup.get("batter", {}).get("fullName", "Unknown"),
         "current_batter_hand": matchup.get("batSide", {}).get("code"),
+        "current_batter_order_slot": current_batter_order_slot,
+        "next_batter_pocket": next_batter_pocket,
+        "lineup_pressure_score": lineup_pocket_score({"next_batter_pocket": next_batter_pocket, "current_batter_order_slot": current_batter_order_slot}),
         "pitcher_name": pitcher.get("fullName", "Unknown"),
         "pitcher_id": pitcher.get("id"),
         "pitcher_hand": matchup.get("pitchHand", {}).get("code"),
+        "home_probable_pitcher": (gd.get("probablePitchers", {}).get("home", {}) or {}).get("fullName", ""),
+        "away_probable_pitcher": (gd.get("probablePitchers", {}).get("away", {}) or {}).get("fullName", ""),
+        "real_time_provider": LIVE_GAME_PROVIDER,
     }
 
 
@@ -4468,14 +5618,158 @@ def edge_grade(edge):
     return "Noise"
 
 
+
+def normalize_book_key(title):
+    """Normalize sportsbook titles from Odds API into stable names."""
+    t = str(title or "").strip().lower()
+    aliases = {
+        "betmgm": "betmgm",
+        "bet mgm": "betmgm",
+        "draftkings": "draftkings",
+        "draft kings": "draftkings",
+        "fanduel": "fanduel",
+        "fan duel": "fanduel",
+        "caesars": "caesars",
+        "caesars sportsbook": "caesars",
+        "espn bet": "espnbet",
+        "espnbet": "espnbet",
+        "bet365": "bet365",
+        "fanatics": "fanatics",
+    }
+    return aliases.get(t, t.replace(" ", ""))
+
+
+def choose_primary_book_total(book_totals):
+    """
+    Pick a practical live total from book-level data.
+    Prefer books in PREFERRED_BOOKS; otherwise use the first available book.
+    """
+    if not book_totals:
+        return {"point": None, "over_price": None, "under_price": None, "book": None}
+    by_key = {normalize_book_key(b.get("book")): b for b in book_totals}
+    for preferred in PREFERRED_BOOKS:
+        if preferred in by_key:
+            return by_key[preferred]
+    return book_totals[0]
+
+
+def book_price_ok(price):
+    try:
+        return price is None or (MAX_PRICE_FAVORITE <= int(price) <= MAX_PRICE_DOG)
+    except Exception:
+        return False
+
+
+def price_penalty_ticks(price):
+    """
+    Small practical penalty for worse live-app prices.
+    Used only to choose between nearby available lines; it does not replace price_ok().
+    """
+    if price is None:
+        return 8
+    p = abs(safe_int(price, 999))
+    if p <= 105:
+        return 0
+    if p <= 115:
+        return 4
+    if p <= 125:
+        return 8
+    if p <= 135:
+        return 14
+    return 22
+
+
+def best_available_for_side(book_totals, side):
+    """
+    Raw best line. For OVER, lower point is best. For UNDER, higher point is best.
+    Keeps price inside the allowed playable window.
+    """
+    side = str(side or "").upper()
+    candidates = []
+    for b in book_totals or []:
+        point = safe_float(b.get("point"), None)
+        if point is None:
+            continue
+        price = b.get("over_price") if side == "OVER" else b.get("under_price")
+        if not book_price_ok(price):
+            continue
+        candidates.append({**b, "side_price": price})
+    if not candidates:
+        return None
+    if side == "OVER":
+        return sorted(candidates, key=lambda x: (safe_float(x.get("point"), 99), price_penalty_ticks(x.get("side_price"))))[0]
+    if side == "UNDER":
+        return sorted(candidates, key=lambda x: (-safe_float(x.get("point"), -99), price_penalty_ticks(x.get("side_price"))))[0]
+    return None
+
+
+def price_adjusted_best_available_for_side(book_totals, side):
+    """
+    Practical best line for real apps. Sometimes a half-run worse number at a much
+    better price is more playable than the raw best number at the edge of the price cap.
+    PRICE_ADJUSTED_HALF_RUN_VALUE controls the tradeoff.
+    """
+    side = str(side or "").upper()
+    candidates = []
+    for b in book_totals or []:
+        point = safe_float(b.get("point"), None)
+        if point is None:
+            continue
+        price = b.get("over_price") if side == "OVER" else b.get("under_price")
+        if not book_price_ok(price):
+            continue
+        candidates.append({**b, "side_price": price})
+    if not candidates:
+        return None
+    if side == "OVER":
+        best_raw_point = min(safe_float(c.get("point"), 99) for c in candidates)
+        def score(c):
+            half_runs_worse = max(0, (safe_float(c.get("point"), best_raw_point) - best_raw_point) / 0.5)
+            return half_runs_worse * PRICE_ADJUSTED_HALF_RUN_VALUE + price_penalty_ticks(c.get("side_price"))
+        return sorted(candidates, key=lambda c: (score(c), safe_float(c.get("point"), 99)))[0]
+    if side == "UNDER":
+        best_raw_point = max(safe_float(c.get("point"), -99) for c in candidates)
+        def score(c):
+            half_runs_worse = max(0, (best_raw_point - safe_float(c.get("point"), best_raw_point)) / 0.5)
+            return half_runs_worse * PRICE_ADJUSTED_HALF_RUN_VALUE + price_penalty_ticks(c.get("side_price"))
+        return sorted(candidates, key=lambda c: (score(c), -safe_float(c.get("point"), -99)))[0]
+    return None
+
+
+def market_snapshot(book_totals, primary_total=None):
+    pts = [safe_float(b.get("point"), None) for b in (book_totals or [])]
+    pts = [x for x in pts if x is not None]
+    if not pts:
+        return {
+            "book_count": 0,
+            "consensus_total": primary_total,
+            "market_min_total": primary_total,
+            "market_max_total": primary_total,
+            "market_disagreement": 0,
+            "book_totals": [],
+        }
+    consensus = round(sum(pts) / len(pts), 2)
+    return {
+        "book_count": len(pts),
+        "consensus_total": consensus,
+        "market_min_total": min(pts),
+        "market_max_total": max(pts),
+        "market_disagreement": round(max(pts) - min(pts), 2),
+        "book_totals": book_totals or [],
+    }
+
+
 def find_markets(odds_events, home, away):
     mlb_home = clean_team(home)
     mlb_away = clean_team(away)
 
     empty = {
-        "total": {"point": None, "over_price": None, "under_price": None},
+        "total": {"point": None, "over_price": None, "under_price": None, "book": None},
+        "book_totals": [],
+        "book_totals_by_name": {},
         "team_totals": [],
         "remaining_totals": [],
+        "market": market_snapshot([], None),
     }
 
     for ev in odds_events:
@@ -4486,25 +5780,31 @@ def find_markets(odds_events, home, away):
             continue
 
         result = json.loads(json.dumps(empty))
+        book_totals = []
 
         for book in ev.get("bookmakers", []):
+            book_title = book.get("title") or book.get("key") or "Unknown"
+            book_key = normalize_book_key(book_title)
             for market in book.get("markets", []):
                 key = market.get("key")
 
                 if key == "totals":
+                    bt = {"book": book_title, "book_key": book_key, "point": None, "over_price": None, "under_price": None, "last_update": market.get("last_update")}
                     for out in market.get("outcomes", []):
                         if out.get("name") == "Over":
-                            result["total"]["point"] = out.get("point")
-                            result["total"]["over_price"] = out.get("price")
+                            bt["point"] = out.get("point")
+                            bt["over_price"] = out.get("price")
                         elif out.get("name") == "Under":
-                            result["total"]["point"] = out.get("point")
-                            result["total"]["under_price"] = out.get("price")
+                            bt["point"] = out.get("point")
+                            bt["under_price"] = out.get("price")
+                    if bt["point"] is not None:
+                        book_totals.append(bt)
 
                 elif key in ["team_totals", "alternate_team_totals"]:
                     grouped = {}
                     for out in market.get("outcomes", []):
                         team = out.get("description") or out.get("team") or out.get("name")
-                        grouped.setdefault(team, {"team": team, "point": out.get("point"), "over_price": None, "under_price": None})
+                        grouped.setdefault(team, {"team": team, "point": out.get("point"), "over_price": None, "under_price": None, "book": book_title})
                         if out.get("name") == "Over":
                             grouped[team]["over_price"] = out.get("price")
                             grouped[team]["point"] = out.get("point")
@@ -4514,7 +5814,7 @@ def find_markets(odds_events, home, away):
                     result["team_totals"].extend([v for v in grouped.values() if v.get("point") is not None])
 
                 elif key in ["remaining_totals", "live_totals", "game_remaining_totals"]:
-                    rem = {"point": None, "over_price": None, "under_price": None}
+                    rem = {"point": None, "over_price": None, "under_price": None, "book": book_title}
                     for out in market.get("outcomes", []):
                         if out.get("name") == "Over":
                             rem["point"] = out.get("point")
@@ -4525,11 +5825,134 @@ def find_markets(odds_events, home, away):
                     if rem["point"] is not None:
                         result["remaining_totals"].append(rem)
 
+        primary = choose_primary_book_total(book_totals)
+        result["total"] = {
+            "point": primary.get("point"),
+            "over_price": primary.get("over_price"),
+            "under_price": primary.get("under_price"),
+            "book": primary.get("book"),
+        }
+        result["book_totals"] = book_totals
+        result["book_totals_by_name"] = {b.get("book_key"): b for b in book_totals}
+        result["market"] = market_snapshot(book_totals, result["total"].get("point"))
         return result
 
     print(f"NO ODDS MATCH FOR: {away} at {home}")
     return empty
 
+
+def update_line_velocity_state(state_game, markets):
+    """
+    V3.2: track market velocity overall and per book using already-fetched odds.
+    No extra API calls. This tells us whether one book moved first or the whole
+    market moved together.
+    """
+    if not ENABLE_MARKET_INTELLIGENCE:
+        return {"line_velocity": 0, "line_velocity_abs": 0, "line_direction": "flat", "history_count": 0, "book_velocities": {}, "leading_book": None}
+    point = safe_float(((markets or {}).get("total") or {}).get("point"), None)
+    if point is None:
+        return {"line_velocity": 0, "line_velocity_abs": 0, "line_direction": "unknown", "history_count": 0, "book_velocities": {}, "leading_book": None}
+    now_ts = time.time()
+
+    hist = state_game.setdefault("line_history", [])
+    hist.append({"ts": now_ts, "point": point})
+    cutoff = now_ts - MARKET_VELOCITY_WINDOW_SECONDS
+    hist[:] = [h for h in hist if safe_float(h.get("ts"), 0) >= cutoff]
+    if len(hist) < 2:
+        overall_move = 0
+        direction = "flat"
+    else:
+        oldest = hist[0]
+        overall_move = round(point - safe_float(oldest.get("point"), point), 2)
+        direction = "up" if overall_move > 0 else "down" if overall_move < 0 else "flat"
+
+    # Per-book velocities.
+    book_hist = state_game.setdefault("book_line_history", {})
+    book_velocities = {}
+    for b in (markets or {}).get("book_totals", []) or []:
+        key = b.get("book_key") or normalize_book_key(b.get("book"))
+        b_point = safe_float(b.get("point"), None)
+        if not key or b_point is None:
+            continue
+        bh = book_hist.setdefault(key, [])
+        bh.append({"ts": now_ts, "point": b_point, "book": b.get("book")})
+        bh[:] = [h for h in bh if safe_float(h.get("ts"), 0) >= cutoff]
+        if len(bh) >= 2:
+            b_move = round(b_point - safe_float(bh[0].get("point"), b_point), 2)
+        else:
+            b_move = 0
+        book_velocities[key] = {"book": b.get("book"), "move": b_move, "direction": "up" if b_move > 0 else "down" if b_move < 0 else "flat"}
+
+    leading = None
+    if book_velocities:
+        leading = max(book_velocities.values(), key=lambda x: abs(safe_float(x.get("move"), 0)))
+        if abs(safe_float(leading.get("move"), 0)) == 0:
+            leading = None
+
+    return {
+        "line_velocity": overall_move,
+        "line_velocity_abs": abs(overall_move),
+        "line_direction": direction,
+        "history_count": len(hist),
+        "book_velocities": book_velocities,
+        "book_velocity_summary": "; ".join([f"{v.get('book')} {safe_float(v.get('move'),0):+.1f}" for v in book_velocities.values() if abs(safe_float(v.get('move'),0)) >= 0.5])[:180],
+        "leading_book": (leading or {}).get("book"),
+    }
+
+def market_confirmation_score(side, market_info, velocity_info, opening_total=None, live_total=None):
+    """
+    Score whether the betting market confirms the baseball signal.
+    OVER likes upward velocity and/or an available lower-than-consensus number.
+    UNDER likes downward velocity and/or an available higher-than-consensus number.
+    """
+    if not ENABLE_MARKET_INTELLIGENCE:
+        return 50
+    side = str(side or "").upper()
+    market_info = market_info or {}
+    velocity_info = velocity_info or {}
+    book_count = safe_int(market_info.get("book_count"), 0)
+    if book_count <= 0:
+        return 50
+
+    score = 45
+    disagreement = safe_float(market_info.get("market_disagreement"), 0)
+    consensus = safe_float(market_info.get("consensus_total"), live_total)
+    best = market_info.get("best_for_side") or {}
+    best_point = safe_float(best.get("point"), live_total)
+    line_velocity = safe_float(velocity_info.get("line_velocity"), 0)
+
+    # More books = better market read.
+    score += min(15, book_count * 4)
+
+    if side == "OVER":
+        if line_velocity > 0:
+            score += min(20, line_velocity * 14)
+        elif line_velocity < 0:
+            score -= min(25, abs(line_velocity) * 16)
+        if best_point is not None and consensus is not None and best_point <= consensus - 0.25:
+            score += 10
+    elif side == "UNDER":
+        if line_velocity < 0:
+            score += min(20, abs(line_velocity) * 14)
+        elif line_velocity > 0:
+            score -= min(25, line_velocity * 16)
+        if best_point is not None and consensus is not None and best_point >= consensus + 0.25:
+            score += 10
+
+    if disagreement >= MARKET_DISAGREEMENT_STRONG:
+        score += 8
+
+    # V3.4: modestly reward a preferred leading book moving in the same direction.
+    lbs = leading_book_score(side, velocity_info)
+    score += (lbs - 50) * 0.35
+    if opening_total is not None and live_total is not None:
+        move_from_open = safe_float(live_total, 0) - safe_float(opening_total, 0)
+        if side == "OVER" and move_from_open > 0:
+            score += min(10, move_from_open * 3)
+        if side == "UNDER" and move_from_open < 0:
+            score += min(10, abs(move_from_open) * 3)
+
+    return round(clamp(score))
 
 
 def live_evidence_report(info, p, q, traffic, scores, scenario, side=None):
@@ -4774,58 +6197,37 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
 
 
 def should_alert(state_game, opportunity):
+    """
+    Technical send guard only. The betting decision is made by v26_final_betnow_gate().
+    This function only prevents exact duplicate sends and records the send event.
+    """
+    if not opportunity or opportunity.get("action") != "STRIKE":
+        return False
+
     now_ts = time.time()
     alerts = state_game.setdefault("alerts", [])
-
-    key = f"{opportunity['market_type']}|{opportunity['side']}"
-    scenario = opportunity["scenario"]
-    edge = abs(opportunity["edge"])
+    side = str(opportunity.get("side", "")).upper()
     line = opportunity.get("line")
-    price = opportunity.get("price")
-    action = opportunity.get("action", "STRIKE")
-
-    side_alerts = [a for a in alerts if a.get("key") == key]
-    strike_count = sum(1 for a in side_alerts if a.get("action") == "STRIKE")
-    if action == "STRIKE" and strike_count >= MAX_ALERTS_PER_GAME_SIDE:
-        # Allow one more only if the line materially improves or edge jumps.
-        best_edge = max([a.get("edge_abs", 0) for a in side_alerts], default=0)
-        best_line = side_alerts[-1].get("line") if side_alerts else None
-        line_improved = False
-        if best_line is not None:
-            if opportunity["side"] == "OVER":
-                line_improved = line <= best_line - LINE_IMPROVEMENT_TO_REPEAT
-            else:
-                line_improved = line >= best_line + LINE_IMPROVEMENT_TO_REPEAT
-        if not line_improved and edge < best_edge + EDGE_IMPROVEMENT_TO_REPEAT:
-            return False
 
     for a in reversed(alerts):
-        if a.get("key") != key:
-            continue
-
-        seconds_since = now_ts - a.get("ts", 0)
-        same_scenario = a.get("scenario") == scenario
-        same_line = a.get("line") == line
-        same_action = a.get("action") == action
-        edge_improved = edge >= a.get("edge_abs", 0) + EDGE_IMPROVEMENT_TO_REPEAT
-
-        # Do not resend the same side/same line just because price moved slightly.
-        if seconds_since < ALERT_COOLDOWN_SECONDS and same_line and same_action and not edge_improved:
+        if a.get("action") == "STRIKE" and a.get("side") == side and a.get("line") == line:
             return False
 
-        # Do not spam same scenario inside cooldown unless edge materially improves.
-        if seconds_since < ALERT_COOLDOWN_SECONDS and same_scenario and same_action and not edge_improved:
+    if V26_ONE_BET_NOW_PER_GAME:
+        prior_strikes = [a for a in alerts if a.get("action") == "STRIKE"]
+        if prior_strikes and not opportunity.get("reversal"):
             return False
 
     alerts.append({
         "ts": now_ts,
-        "key": key,
-        "scenario": clean_scenario_label(scenario),
-        "edge_abs": edge,
+        "side": side,
         "line": line,
-        "price": price,
-        "action": action,
+        "price": opportunity.get("price"),
+        "action": "STRIKE",
         "confidence": opportunity.get("confidence"),
+        "edge_abs": abs(safe_float(opportunity.get("edge"), 0)),
+        "scenario": clean_scenario_label(opportunity.get("scenario", "")),
+        "reversal": bool(opportunity.get("reversal")),
     })
     return True
 
@@ -4945,13 +6347,14 @@ def format_alert(label, start_label, info, market_context, opportunity, p, q, tr
     history_note = historical_pattern_note(info, opportunity)
 
     return (
-        f"SHIFT MLB V2.4.0 PRO CONTACT/BULLPEN LEARNING {action}\n\n"
+        f"{'🔄 SHIFT REVERSAL — BET NOW' if opportunity.get('reversal') else '🚨 SHIFT MLB V3.4 PROFESSIONAL STRIKE — BET NOW'}\n\n"
         f"{label}\n"
         f"Start: {start_label}\n\n"
         f"Instruction:\n"
-        f"{instruction}\n\n"
+        f"BET NOW\n\n"
         f"Scenario:\n"
-        f"{opportunity['scenario']}\n\n"
+        f"{opportunity['scenario']}\n"
+        f"{'Previous Thesis: ' + thesis_summary_text(opportunity.get('previous_thesis')) + chr(10) if opportunity.get('reversal') else ''}\n"
         f"Market:\n"
         f"{opportunity['market_type']}\n\n"
         f"PLAY:\n"
@@ -4991,6 +6394,12 @@ def format_alert(label, start_label, info, market_context, opportunity, p, q, tr
         f"Stack: {scores.get('signal_stack', 0)} ({', '.join(scores.get('signal_stack_labels', []))})\n"
         f"Lag: {scores.get('market_lag', 0)}/100\n"
         f"ConvAccel: {scores.get('conv_acceleration', 0)}/100\n"
+        f"KEnv: {scores.get('strikeout_environment', 0)}/100\n"
+        f"BPLock: {scores.get('bullpen_lockdown', 0)}/100\n"
+        f"TConv: {scores.get('traffic_conversion', 0)}/100\n"
+        f"HHEff: {scores.get('hard_hit_efficiency', 0)}/100\n"
+        f"HHUnder: {scores.get('hard_hit_under_support', 0)}/100\n"
+        f"Expires If: {expiration_text(info, opportunity)}\n"
         f"P2RBoost: {scores.get('p2r_boost', 0)}\n"
         f"Market Resistance: {scores.get('market_resistance', 0)}\n"
         f"Run Suppression: {scores['run_suppression']}/100\n"
@@ -5022,9 +6431,30 @@ def determine_next_sleep(any_live, any_near_strike):
     return SLOW_POLL_SECONDS
 
 
+
+def current_recommendations_snapshot(state):
+    """
+    Returns the current login/feed recommendation for every tracked game.
+    This makes the stored current_recommendation usable by a dashboard, log viewer, or future endpoint.
+    """
+    rows = []
+    for key, game_state in (state or {}).get("games", {}).items():
+        rec = game_state.get("current_recommendation")
+        if not rec:
+            continue
+        item = dict(rec)
+        item["state_key"] = key
+        thesis = game_state.get("active_thesis")
+        if thesis:
+            item["active_thesis"] = thesis_summary_text(thesis)
+        rows.append(item)
+    rows.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
+    return rows
+
 def main():
     state = load_state()
     build_learning_summary()
+    print("REAL-TIME DATA ADAPTER:", realtime_data_status())
 
     while True:
         any_live = False
@@ -5066,7 +6496,7 @@ def main():
             if not needs_odds:
                 print("ODDS SKIPPED: all games outside pregame window.")
 
-            print(f"\n--- SHIFT V2 CHECK {now_local().strftime('%I:%M:%S %p')} ---")
+            print(f"\n--- SHIFT V3.5 CHECK {now_local().strftime('%I:%M:%S %p')} ---")
 
             for g in games:
                 game_pk = str(g["gamePk"])
@@ -5097,6 +6527,8 @@ def main():
                     state["games"][game_pk] = {
                         "opening_total": None,
                         "alerts": [],
+                        "active_thesis": None,
+                        "current_recommendation": None,
                     }
 
                 state_game = state["games"][game_pk]
@@ -5130,12 +6562,18 @@ def main():
 
                 markets = find_markets(odds, info["home"], info["away"])
                 live_total = markets["total"]["point"]
+                velocity_info = update_line_velocity_state(state_game, markets)
                 update_active_clv_snapshots(info, live_total)
 
+                # V3.2: this is the first total this bot saw today, not necessarily the true opener.
                 if state_game["opening_total"] is None and live_total:
                     state_game["opening_total"] = live_total
+                state_game.setdefault("first_seen_total", state_game.get("opening_total"))
+                state_game.setdefault("true_opening_total", None)
 
                 opening_total = state_game["opening_total"]
+                first_seen_total = state_game.get("first_seen_total")
+                true_opening_total = state_game.get("true_opening_total")
 
                 p = pitcher_box(feed, info["pitcher_id"])
                 q = live_statcast_quality(feed, info["pitcher_id"])
@@ -5352,6 +6790,50 @@ def main():
                     state,
                 )
 
+                # Market intelligence uses book-level totals when the Odds API returns them.
+                side_for_market = opportunity.get("side") if opportunity else None
+                market_snapshot_info = dict(markets.get("market", {}))
+                best_for_side = best_available_for_side(markets.get("book_totals", []), side_for_market) if side_for_market else None
+                price_adjusted_best = price_adjusted_best_available_for_side(markets.get("book_totals", []), side_for_market) if side_for_market else None
+                if price_adjusted_best:
+                    market_snapshot_info["best_for_side"] = price_adjusted_best
+                elif best_for_side:
+                    market_snapshot_info["best_for_side"] = best_for_side
+                market_conf = market_confirmation_score(side_for_market, market_snapshot_info, velocity_info, opening_total, live_total) if side_for_market else 50
+                best_line_for_age = price_adjusted_best or best_for_side or {}
+                best_line_age = book_line_age_seconds(best_line_for_age)
+                market_context_for_state = {
+                    "opening_total": opening_total,
+                    "first_seen_total": first_seen_total,
+                    "true_opening_total": true_opening_total,
+                    "live_total": live_total,
+                    "primary_book": markets.get("total", {}).get("book"),
+                    "book_count": market_snapshot_info.get("book_count", 0),
+                    "consensus_total": market_snapshot_info.get("consensus_total"),
+                    "market_min_total": market_snapshot_info.get("market_min_total"),
+                    "market_max_total": market_snapshot_info.get("market_max_total"),
+                    "market_disagreement": market_snapshot_info.get("market_disagreement"),
+                    "line_velocity": velocity_info.get("line_velocity"),
+                    "line_direction": velocity_info.get("line_direction"),
+                    "book_velocity_summary": velocity_info.get("book_velocity_summary"),
+                    "leading_book": velocity_info.get("leading_book"),
+                    "best_book": (best_for_side or {}).get("book"),
+                    "best_available_total": (best_for_side or {}).get("point"),
+                    "best_available_price": (best_for_side or {}).get("side_price"),
+                    "price_adjusted_best_book": (price_adjusted_best or {}).get("book"),
+                    "price_adjusted_best_total": (price_adjusted_best or {}).get("point"),
+                    "price_adjusted_best_price": (price_adjusted_best or {}).get("side_price"),
+                    "best_line_last_update": (best_line_for_age or {}).get("last_update"),
+                    "best_line_age_seconds": best_line_age,
+                    "market_confirmation_score": market_conf,
+                }
+                alert_opportunity, decision_reason = apply_professional_decision_layer(
+                    state_game,
+                    info,
+                    market_context_for_state,
+                    opportunity,
+                )
+
                 edge_for_sleep = abs(opportunity["edge"]) if opportunity else 0
                 if edge_for_sleep >= 0.7:
                     any_near_strike = True
@@ -5362,6 +6844,7 @@ def main():
                     f"{mode} | {label} | {info['inning_state']} {info['inning']} | "
                     f"Score {info['away_runs']}-{info['home_runs']} | Base {info['base_state']['label']} {info['outs']} out | "
                     f"Open {opening_total} Live {live_total} Projected {projected_total} EFR {expected_future} | "
+                    f"Books {market_context_for_state.get('book_count', 0)} Cons {market_context_for_state.get('consensus_total')} Best {market_context_for_state.get('best_book')} {market_context_for_state.get('best_available_total')} Vel {market_context_for_state.get('line_velocity')} MktConf {market_context_for_state.get('market_confirmation_score')} | "
                     f"Scenario {scenario} | "
                     f"CIP {current_pressure} RO {remaining_opp} Stress {stress} Dom {dominance} Contact {contact} "
                     f"Trend {contact_trend} Lineup {lineup_pressure} Bullpen {bullpen} Exit {starter_exit} TTO {tto} "
@@ -5374,30 +6857,30 @@ def main():
                     save_state(state)
                     continue
 
-                if opportunity and should_alert(state_game, opportunity):
-                    market_context = {"opening_total": opening_total}
+                if alert_opportunity and should_alert(state_game, alert_opportunity):
+                    market_context = market_context_for_state
                     msg = format_alert(
                         label,
                         start_label,
                         info,
                         market_context,
-                        opportunity,
+                        alert_opportunity,
                         p,
                         q,
                         traffic,
                         hitters,
                         flags,
                     )
-                    send_text(msg)
+                    sms_body = format_bet_now_sms(label, info, market_context, alert_opportunity)
+                    send_text(msg, sms_body=sms_body)
                     log_strike_history(
                         info,
-                        opportunity,
+                        alert_opportunity,
                         {
-                            "opening_total": opening_total,
-                            "live_total": live_total,
+                            **market_context,
                         },
                     )
-                    record_strike_lock(state, info, opportunity)
+                    record_active_thesis(state_game, info, alert_opportunity)
 
                 save_state(state)
 
