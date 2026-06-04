@@ -4,6 +4,8 @@ import json
 import math
 import csv
 import requests
+import smtplib
+from email.message import EmailMessage
 from urllib.parse import urlparse
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -11,10 +13,10 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V3.5 REAL-TIME DATA ADAPTER + BET NOW ONLY
+SHIFT MLB V3.6 REPORTING + BETMGM PRACTICAL MODE
 
 Professional live MLB totals monitor.
-V3.5 keeps the V3.4 intelligence engine and formalizes the real-time data adapter layer.
+V3.6 keeps the V3.5 real-time data adapter and adds nightly email reporting, BetMGM-first recommendations, market discount tracking, and cleaner audit logging.
 It uses MLB Stats API for live game context, probable pitchers, current batter, batting-order pocket, pitch/play-by-play context, and The Odds API for bookmaker totals. Premium providers can be added later through environment switches without rewriting the betting engine.
 V2.2.1 adds:
     - Dedicated Pre-Run OVER WATCH engine
@@ -55,7 +57,7 @@ Important:
 load_dotenv()
 
 TZ = ZoneInfo("America/Phoenix")
-STATE_FILE = os.getenv("STATE_FILE", "shift_v35_state.json")
+STATE_FILE = os.getenv("STATE_FILE", "shift_v36_state.json")
 
 STRIKE_HISTORY_FILE = os.getenv("STRIKE_HISTORY_FILE", "strike_history.csv")
 CLV_HISTORY_FILE = os.getenv("CLV_HISTORY_FILE", "clv_history.csv")
@@ -67,6 +69,19 @@ ENABLE_SELF_LEARNING = os.getenv("ENABLE_SELF_LEARNING", "true").lower() == "tru
 # Prints a summary to Railway logs after games finish and optionally texts it.
 ENABLE_DAILY_LEARNING_REPORT = os.getenv("ENABLE_DAILY_LEARNING_REPORT", "true").lower() == "true"
 SEND_DAILY_LEARNING_REPORT_SMS = os.getenv("SEND_DAILY_LEARNING_REPORT_SMS", "true").lower() == "true"
+
+# V3.6 nightly email reporting.
+# SMS remains BET NOW only. Email becomes the full archive for analysis.
+ENABLE_NIGHTLY_EMAIL_REPORT = os.getenv("ENABLE_NIGHTLY_EMAIL_REPORT", "true").lower() == "true"
+NIGHTLY_EMAIL_TO = os.getenv("NIGHTLY_EMAIL_TO", "danderson9@live.com").strip()
+NIGHTLY_EMAIL_SUBJECT_PREFIX = os.getenv("NIGHTLY_EMAIL_SUBJECT_PREFIX", "SHIFT MLB Daily Summary").strip()
+EMAIL_FROM = os.getenv("EMAIL_FROM", os.getenv("SMTP_USER", "")).strip()
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
+ATTACH_DAILY_CSVS_TO_EMAIL = os.getenv("ATTACH_DAILY_CSVS_TO_EMAIL", "true").lower() == "true"
 
 # V2.4.1 user-facing grading upgrade:
 # Sends a short result text as soon as each completed STRIKE is graded.
@@ -193,6 +208,19 @@ MARKET_VELOCITY_WINDOW_SECONDS = int(os.getenv("MARKET_VELOCITY_WINDOW_SECONDS",
 LINE_VELOCITY_STRONG_MOVE = float(os.getenv("LINE_VELOCITY_STRONG_MOVE", "1.0"))
 MARKET_DISAGREEMENT_STRONG = float(os.getenv("MARKET_DISAGREEMENT_STRONG", "1.0"))
 PREFERRED_BOOKS = [b.strip().lower() for b in os.getenv("PREFERRED_BOOKS", "betmgm,draftkings,fanduel,caesars,espnbet,bet365,fanatics").split(",") if b.strip()]
+
+# V3.6 practical betting-app controls.
+# Use major books for market intelligence, but recommend only the book(s) the user can actually bet.
+USER_PLAYABLE_BOOKS = [b.strip().lower() for b in os.getenv("USER_PLAYABLE_BOOKS", "betmgm").split(",") if b.strip()]
+MARKET_REFERENCE_BOOKS = [b.strip().lower() for b in os.getenv("MARKET_REFERENCE_BOOKS", "draftkings,fanduel,betmgm,caesars").split(",") if b.strip()]
+IGNORE_RECOMMENDATION_BOOKS = [b.strip().lower() for b in os.getenv("IGNORE_RECOMMENDATION_BOOKS", "mybookie,mybookieag,mybookie.ag").split(",") if b.strip()]
+REQUIRE_PLAYABLE_BOOK_FOR_STRIKE = os.getenv("REQUIRE_PLAYABLE_BOOK_FOR_STRIKE", "true").lower() == "true"
+MARKET_DISCOUNT_OVER_BOOST_MIN = float(os.getenv("MARKET_DISCOUNT_OVER_BOOST_MIN", "1.0"))
+MARKET_DISCOUNT_OVER_STRONG = float(os.getenv("MARKET_DISCOUNT_OVER_STRONG", "2.0"))
+MARKET_DISCOUNT_OVER_EXTREME = float(os.getenv("MARKET_DISCOUNT_OVER_EXTREME", "3.0"))
+WEAK_LINEUP_SCORE_BLOCK = int(os.getenv("WEAK_LINEUP_SCORE_BLOCK", "45"))
+WEAK_LINEUP_MIN_P2R = int(os.getenv("WEAK_LINEUP_MIN_P2R", "92"))
+WEAK_LINEUP_MIN_CONV = int(os.getenv("WEAK_LINEUP_MIN_CONV", "88"))
 
 # V3.1 practical live-app controls.
 # Do not chase markets that already moved too far unless baseball + market confirmation are elite.
@@ -522,6 +550,75 @@ def market_label(price):
     return "Bad price"
 
 
+# -----------------------------
+# V3.6 practical book / market discount helpers
+# -----------------------------
+
+def normalize_book_name(name):
+    return str(name or "").lower().replace(" ", "").replace("_", "").replace("-", "").replace(".", "").strip()
+
+
+def book_matches(book, names):
+    b = normalize_book_name(book)
+    normalized = [normalize_book_name(n) for n in (names or [])]
+    return any(n and (b == n or n in b or b in n) for n in normalized)
+
+
+def is_user_playable_book(book):
+    return book_matches(book, USER_PLAYABLE_BOOKS)
+
+
+def is_ignored_recommendation_book(book):
+    return book_matches(book, IGNORE_RECOMMENDATION_BOOKS)
+
+
+def playable_book_filter_candidates(candidates):
+    """Return candidates from books the user can actually bet."""
+    if not candidates:
+        return []
+    if USER_PLAYABLE_BOOKS:
+        return [c for c in candidates if is_user_playable_book(c.get("book"))]
+    return [c for c in candidates if not is_ignored_recommendation_book(c.get("book"))]
+
+
+def market_reference_book_totals(book_totals):
+    """Major-market subset for confirmation; falls back to all books if unavailable."""
+    if not book_totals or not MARKET_REFERENCE_BOOKS:
+        return book_totals or []
+    refs = [b for b in book_totals if book_matches(b.get("book"), MARKET_REFERENCE_BOOKS)]
+    return refs or book_totals or []
+
+
+def market_discount_value(first_seen_total, live_total):
+    fs = safe_float(first_seen_total, None)
+    live = safe_float(live_total, None)
+    if fs is None or live is None:
+        return 0.0
+    return round(fs - live, 2)
+
+
+def market_discount_score(side, first_seen_total, live_total, scores=None):
+    """Positive score means the live number is discounted in the direction we want."""
+    side = str(side or "").upper()
+    discount = market_discount_value(first_seen_total, live_total)
+    if side == "OVER":
+        d = discount
+    elif side == "UNDER":
+        d = -discount
+    else:
+        return 0
+    if d < MARKET_DISCOUNT_OVER_BOOST_MIN:
+        return 0
+    score = 30
+    if d >= MARKET_DISCOUNT_OVER_STRONG:
+        score += 25
+    if d >= MARKET_DISCOUNT_OVER_EXTREME:
+        score += 25
+    p2r = safe_int((scores or {}).get("pressure_to_runs"), 0)
+    conv = safe_int((scores or {}).get("run_conversion"), safe_int((scores or {}).get("traffic_conversion"), 0))
+    if side == "OVER" and p2r >= 85 and conv >= 80:
+        score += 20
+    return round(clamp(score))
 
 
 
@@ -841,6 +938,8 @@ def v33_baseball_quality_block_reason(info, opportunity):
     if side == "OVER":
         if inning < EARLY_OVER_MIN_INNING and not (p2r >= EARLY_OVER_MIN_P2R and tconv >= EARLY_OVER_MIN_TRAFFIC and stress >= EARLY_OVER_MIN_STRESS):
             return "baseball block: early OVER lacks elite pressure/traffic/stress"
+        if lineup_score < WEAK_LINEUP_SCORE_BLOCK and not (p2r >= WEAK_LINEUP_MIN_P2R and tconv >= WEAK_LINEUP_MIN_CONV):
+            return f"baseball block: weak lineup pocket ({lineup_score}) requires elite P2R/Conv"
         if lineup_score < LINEUP_POCKET_MIN_OVER and p2r < 90:
             return f"baseball block: OVER lacks lineup-pocket support ({lineup_score})"
         if bullpen_risk < BULLPEN_CONTEXT_MIN_OVER and inning >= 5 and p2r < 85:
@@ -918,9 +1017,15 @@ def apply_price_adjusted_best_line(info, market_context, opportunity):
     best_price = market_context.get("price_adjusted_best_price") or market_context.get("best_available_price")
     best_book = market_context.get("price_adjusted_best_book") or market_context.get("best_book")
     if best_line is None:
+        if REQUIRE_PLAYABLE_BOOK_FOR_STRIKE and USER_PLAYABLE_BOOKS:
+            opportunity["action"] = "NO_PLAY"
+            opportunity["app_status"] = "NO BET — no playable BetMGM/user-book line available"
         return opportunity
     best_line = safe_float(best_line, None)
     if best_line is None:
+        if REQUIRE_PLAYABLE_BOOK_FOR_STRIKE and USER_PLAYABLE_BOOKS:
+            opportunity["action"] = "NO_PLAY"
+            opportunity["app_status"] = "NO BET — no playable BetMGM/user-book line available"
         return opportunity
 
     # Use the same projected total but recompute the actionable edge to the line a user can bet.
@@ -1002,7 +1107,7 @@ def post_tracking_event(event_type, payload):
     body = {
         "event_type": event_type,
         "sent_at": now_local().isoformat(),
-        "source": "SHIFT_MLB_V3_4_INTEL",
+        "source": "SHIFT_MLB_V3_6_REPORTING",
         "payload": payload,
     }
     headers = {"Content-Type": "application/json"}
@@ -1297,6 +1402,7 @@ def strike_fieldnames():
         "threat_index", "signal_stack", "market_lag", "conv_acceleration",
         "k_env", "bullpen_lockdown", "traffic_conversion", "hh_eff", "hh_under",
         "over_pressure_score", "under_suppression_score", "market_value_score", "risk_filter_score",
+        "market_discount", "market_discount_score",
         "consensus_total", "market_min_total", "market_max_total", "market_disagreement",
         "line_velocity", "line_direction", "primary_book", "best_book", "best_available_total",
         "best_available_price", "price_adjusted_best_book", "price_adjusted_best_total",
@@ -1661,6 +1767,116 @@ def send_admin_text(msg):
 
 
 
+def daily_rows_for_email(path, report_date=None, graded_only=False):
+    report_date = report_date or today()
+    rows = [r for r in csv_read_rows(path) if r.get("date") == report_date]
+    if graded_only:
+        rows = [r for r in rows if r.get("result") in ["WIN", "LOSS", "PUSH"]]
+    return rows
+
+
+def compact_row_for_email(row, include_result=True):
+    result = row.get("result", "") if include_result else row.get("action", "")
+    game = row.get("game", "")
+    side = row.get("side", "")
+    line = row.get("line", "")
+    price = row.get("price", "")
+    book = row.get("recommended_book") or row.get("price_adjusted_best_book") or row.get("best_book") or row.get("primary_book") or ""
+    final = row.get("final_score", "")
+    extras = [
+        f"EV {row.get('expected_value', '')}",
+        f"MktConf {row.get('market_confirmation_score', '')}",
+        f"Disc {row.get('market_discount', '')}",
+        f"Vel {row.get('line_velocity', '')}",
+        f"Lineup {row.get('lineup_pressure_score', '')}",
+        f"Bullpen {row.get('bullpen_context_score', '')}",
+        f"Quality {row.get('bet_quality', '')}",
+    ]
+    prefix = f"{result}: " if result else ""
+    final_text = f" | Final {final}" if final else ""
+    return f"• {prefix}{game} | {side} {line} ({price}) at {book}{final_text} | " + " | ".join(extras)
+
+
+def generate_nightly_email_body(report_date=None):
+    report_date = report_date or today()
+    report = generate_daily_learning_report(report_date)
+    strikes = daily_rows_for_email(STRIKE_HISTORY_FILE, report_date, graded_only=False)
+    results = daily_rows_for_email(GRADED_RESULTS_FILE, report_date, graded_only=True)
+
+    lines = []
+    lines.append(report)
+    lines.append("\n" + "=" * 60)
+    lines.append("ALL SHIFT STRIKES")
+    lines.append("=" * 60)
+    if strikes:
+        for r in strikes:
+            if r.get("action") == "STRIKE":
+                lines.append(compact_row_for_email(r, include_result=False))
+    else:
+        lines.append("No STRIKE rows stored for today.")
+
+    lines.append("\n" + "=" * 60)
+    lines.append("ALL SHIFT RESULTS")
+    lines.append("=" * 60)
+    if results:
+        for r in results:
+            lines.append(compact_row_for_email(r, include_result=True))
+    else:
+        lines.append("No graded results stored for today yet.")
+
+    lines.append("\nFiles attached when available: strike_history.csv, graded_results.csv, learning_summary.csv, clv_history.csv")
+    return "\n".join(lines)
+
+
+def attach_csv_if_exists(message, path):
+    if not path or not os.path.exists(path):
+        return
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        message.add_attachment(data, maintype="text", subtype="csv", filename=os.path.basename(path))
+    except Exception as e:
+        print(f"EMAIL ATTACHMENT ERROR {path}:", repr(e))
+
+
+def send_nightly_summary_email(report_date=None):
+    if not ENABLE_NIGHTLY_EMAIL_REPORT:
+        print("NIGHTLY EMAIL NOT SENT: disabled by ENABLE_NIGHTLY_EMAIL_REPORT.")
+        return False
+    if not NIGHTLY_EMAIL_TO:
+        print("NIGHTLY EMAIL NOT SENT: NIGHTLY_EMAIL_TO missing.")
+        return False
+    if not all([SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD]):
+        print("NIGHTLY EMAIL NOT SENT: SMTP settings missing. Add SMTP_USER and SMTP_PASSWORD in Railway variables.")
+        return False
+
+    report_date = report_date or today()
+    body = generate_nightly_email_body(report_date)
+    subject = f"{NIGHTLY_EMAIL_SUBJECT_PREFIX} — {report_date}"
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_FROM or SMTP_USER
+    msg["To"] = NIGHTLY_EMAIL_TO
+    msg.set_content(body)
+
+    if ATTACH_DAILY_CSVS_TO_EMAIL:
+        for path in [STRIKE_HISTORY_FILE, GRADED_RESULTS_FILE, LEARNING_SUMMARY_FILE, CLV_HISTORY_FILE]:
+            attach_csv_if_exists(msg, path)
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            if SMTP_USE_TLS:
+                server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+        print(f"NIGHTLY SUMMARY EMAIL SENT to {NIGHTLY_EMAIL_TO}")
+        return True
+    except Exception as e:
+        print("NIGHTLY SUMMARY EMAIL ERROR:", repr(e))
+        return False
+
+
 def strongest_signal_pairs(row, limit=5):
     """
     Converts the model scores saved with the STRIKE into short, readable signal labels.
@@ -1813,6 +2029,9 @@ def maybe_send_daily_learning_report(state, any_live):
     report = generate_daily_learning_report(today())
     print("DAILY LEARNING REPORT GENERATED")
     send_admin_text(report)
+    email_sent = send_nightly_summary_email(today())
+    if email_sent:
+        state["nightly_email_report_sent_for"] = today()
     state[sent_key] = today()
     save_state(state)
 
@@ -2352,6 +2571,8 @@ def log_strike_history(info, opportunity, market_context=None):
         "under_suppression_score": master_score_from_scores("UNDER", scores),
         "market_value_score": master_market_value_score(opportunity, scores),
         "risk_filter_score": master_risk_filter_score(opportunity, info, scores),
+        "market_discount": market_context.get("market_discount"),
+        "market_discount_score": market_context.get("market_discount_score"),
         "consensus_total": market_context.get("consensus_total"),
         "market_min_total": market_context.get("market_min_total"),
         "market_max_total": market_context.get("market_max_total"),
@@ -5694,6 +5915,8 @@ def best_available_for_side(book_totals, side):
         if not book_price_ok(price):
             continue
         candidates.append({**b, "side_price": price})
+    candidates = playable_book_filter_candidates(candidates)
+    candidates = playable_book_filter_candidates(candidates)
     if not candidates:
         return None
     if side == "OVER":
@@ -5737,7 +5960,9 @@ def price_adjusted_best_available_for_side(book_totals, side):
 
 
 def market_snapshot(book_totals, primary_total=None):
-    pts = [safe_float(b.get("point"), None) for b in (book_totals or [])]
+    # V3.6: consensus/confirmation should be shaped by major market books first.
+    market_books = market_reference_book_totals(book_totals or [])
+    pts = [safe_float(b.get("point"), None) for b in (market_books or [])]
     pts = [x for x in pts if x is not None]
     if not pts:
         return {
@@ -6826,6 +7051,8 @@ def main():
                     "best_line_last_update": (best_line_for_age or {}).get("last_update"),
                     "best_line_age_seconds": best_line_age,
                     "market_confirmation_score": market_conf,
+                    "market_discount": market_discount_value(first_seen_total, live_total),
+                    "market_discount_score": market_discount_score(side_for_market, first_seen_total, live_total, scores),
                 }
                 alert_opportunity, decision_reason = apply_professional_decision_layer(
                     state_game,
