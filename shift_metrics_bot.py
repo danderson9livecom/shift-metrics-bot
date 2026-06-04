@@ -59,10 +59,10 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # SHIFT deployment identity / anti-confusion banner
 # ---------------------------------------------------------------------------
-APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.6.2")
-APP_MODE = "REPORTING + BETMGM PRACTICAL MODE + MAJOR MARKET FILTER"
+APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.7.1")
+APP_MODE = "MARKET REACTION ENGINE HARDENED + BETMGM + MAJOR MARKET FILTER"
 APP_BUILD_LABEL = f"SHIFT MLB {APP_VERSION} {APP_MODE}"
-DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-major-market-filter-no-mybookie")
+DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-hardened-market-reaction-engine")
 RUN_EMAIL_TEST_ON_START = os.getenv("RUN_EMAIL_TEST_ON_START", "false").lower() == "true"
 
 TZ = ZoneInfo("America/Phoenix")
@@ -230,6 +230,29 @@ MARKET_DISCOUNT_OVER_EXTREME = float(os.getenv("MARKET_DISCOUNT_OVER_EXTREME", "
 WEAK_LINEUP_SCORE_BLOCK = int(os.getenv("WEAK_LINEUP_SCORE_BLOCK", "45"))
 WEAK_LINEUP_MIN_P2R = int(os.getenv("WEAK_LINEUP_MIN_P2R", "92"))
 WEAK_LINEUP_MIN_CONV = int(os.getenv("WEAK_LINEUP_MIN_CONV", "88"))
+
+# V3.7 Market Reaction Engine:
+# SHIFT is not trying to predict baseball in isolation. It is trying to find
+# where the betting market has overreacted or underreacted to live events.
+ENABLE_MARKET_REACTION_ENGINE = os.getenv("ENABLE_MARKET_REACTION_ENGINE", "true").lower() == "true"
+INFLATED_TOTAL_MOVE_RUNS = float(os.getenv("INFLATED_TOTAL_MOVE_RUNS", "2.0"))
+DISCOUNTED_TOTAL_MOVE_RUNS = float(os.getenv("DISCOUNTED_TOTAL_MOVE_RUNS", "1.5"))
+SETTLE_DOWN_MIN_SCORE = int(os.getenv("SETTLE_DOWN_MIN_SCORE", "68"))
+CONTINUATION_OVER_MIN_SCORE = int(os.getenv("CONTINUATION_OVER_MIN_SCORE", "72"))
+CONTINUATION_MAX_FOR_FADE = int(os.getenv("CONTINUATION_MAX_FOR_FADE", "58"))
+FALSE_INFLATION_MIN_SCORE = int(os.getenv("FALSE_INFLATION_MIN_SCORE", "62"))
+MARKET_REACTION_MAX_PROJECTION_ADJ = float(os.getenv("MARKET_REACTION_MAX_PROJECTION_ADJ", "2.5"))
+INFLATED_UNDER_MIN_INNING = int(os.getenv("INFLATED_UNDER_MIN_INNING", "3"))
+INFLATED_UNDER_MIN_EDGE = float(os.getenv("INFLATED_UNDER_MIN_EDGE", "0.75"))
+INFLATED_UNDER_ALLOW_CURRENT_PRESSURE = int(os.getenv("INFLATED_UNDER_ALLOW_CURRENT_PRESSURE", "55"))
+INFLATED_UNDER_ALLOW_CONTACT = int(os.getenv("INFLATED_UNDER_ALLOW_CONTACT", "60"))
+INFLATED_UNDER_MAX_TRAFFIC = int(os.getenv("INFLATED_UNDER_MAX_TRAFFIC", "68"))
+INFLATED_UNDER_MAX_P2R_SOFT = int(os.getenv("INFLATED_UNDER_MAX_P2R_SOFT", "88"))
+INFLATED_OVER_REQUIRE_CONTINUATION = os.getenv("INFLATED_OVER_REQUIRE_CONTINUATION", "true").lower() == "true"
+INFLATED_OVER_MIN_CONTINUATION_EDGE = float(os.getenv("INFLATED_OVER_MIN_CONTINUATION_EDGE", "3.0"))
+INFLATED_OVER_MIN_P2R = int(os.getenv("INFLATED_OVER_MIN_P2R", "90"))
+INFLATED_OVER_MIN_CONV = int(os.getenv("INFLATED_OVER_MIN_CONV", "82"))
+MARKET_REACTION_MIN_SCORE_GAP = int(os.getenv("MARKET_REACTION_MIN_SCORE_GAP", "10"))
 
 # V3.1 practical live-app controls.
 # Do not chase markets that already moved too far unless baseball + market confirmation are elite.
@@ -656,12 +679,272 @@ def market_discount_score(side, first_seen_total, live_total, scores=None):
     return round(clamp(score))
 
 
+# -----------------------------
+# V3.7 Market Reaction Engine
+# -----------------------------
+
+def market_reaction_move(opening_total, first_seen_total, live_total):
+    """Use first_seen when true opening is unknown. Positive = market inflated upward."""
+    live = safe_float(live_total, None)
+    ref = safe_float(opening_total, None)
+    if ref is None:
+        ref = safe_float(first_seen_total, None)
+    if live is None or ref is None:
+        return 0.0, ref
+    return round(live - ref, 2), ref
+
+
+def market_reaction_scores(info, opening_total, first_seen_total, live_total, scores):
+    """
+    Core V3.7 scores:
+    - Settle Down Score: market may have overreacted upward; possible inflated UNDER.
+    - Continuation Score: run environment is still alive; do not blindly fade.
+    - Market Reaction Profile: Discounted OVER / Inflated UNDER / Continuation OVER / False Inflation Fade.
+    """
+    scores = scores or {}
+    move, ref = market_reaction_move(opening_total, first_seen_total, live_total)
+    inning = safe_int((info or {}).get("inning"), 1)
+    innings_left = innings_remaining_estimate(info or {})
+    total_runs = safe_int((info or {}).get("total_runs"), 0)
+    current_pressure = safe_int(scores.get("current_inning_pressure"), 0)
+    remaining_opp = safe_int(scores.get("remaining_opportunity"), 0)
+    stress = safe_int(scores.get("pitcher_stress"), 0)
+    p2r = safe_int(scores.get("pressure_to_runs"), 0)
+    conv = safe_int(scores.get("run_conversion"), 0)
+    traffic = safe_int(scores.get("traffic_conversion"), 0)
+    contact = safe_int(scores.get("contact_quality"), 0)
+    contact_trend = safe_int(scores.get("contact_trend"), 50)
+    hard_hit = safe_int(scores.get("hard_hit_efficiency"), 0)
+    fake = safe_int(scores.get("fake_pressure"), 0)
+    run_prev = safe_int(scores.get("run_prevention"), 0)
+    under_env = safe_int(scores.get("under_environment"), 0)
+    k_env = safe_int(scores.get("strikeout_environment"), 0)
+    bp_lock = safe_int(scores.get("bullpen_lockdown"), 0)
+    bullpen_risk = safe_int(scores.get("bullpen_risk"), 50)
+    blowout = safe_int(scores.get("blowout_kill"), 0)
+
+    # Continuation means the run environment may keep expanding beyond the new number.
+    continuation = 0
+    continuation += max(0, move) * 8
+    continuation += current_pressure * 0.18
+    continuation += remaining_opp * 0.12
+    continuation += stress * 0.13
+    continuation += p2r * 0.18
+    continuation += conv * 0.12
+    continuation += traffic * 0.11
+    continuation += contact * 0.10
+    continuation += max(0, contact_trend - 50) * 0.20
+    continuation += hard_hit * 0.09
+    continuation += bullpen_risk * 0.08
+    continuation -= run_prev * 0.08
+    continuation -= k_env * 0.06
+    continuation -= bp_lock * 0.06
+    continuation -= blowout * 0.10
+
+    # Settle down means the market likely priced in runs already scored more than future pressure.
+    settle = 0
+    settle += max(0, move) * 13
+    settle += max(0, total_runs - 3) * 4
+    settle += max(0, 65 - current_pressure) * 0.22
+    settle += max(0, 65 - remaining_opp) * 0.14
+    settle += max(0, 65 - contact) * 0.16
+    settle += max(0, 65 - traffic) * 0.12
+    settle += max(0, 65 - hard_hit) * 0.10
+    settle += fake * 0.16
+    settle += run_prev * 0.18
+    settle += under_env * 0.18
+    settle += k_env * 0.12
+    settle += bp_lock * 0.12
+    settle += blowout * 0.16
+    if inning >= INFLATED_UNDER_MIN_INNING:
+        settle += 6
+    if innings_left <= 3.5:
+        settle += 8
+    if innings_left <= 2.0:
+        settle += 8
+    if p2r >= 85 or conv >= 85 or traffic >= 70:
+        settle -= 12
+    if stress >= 85 and p2r >= 85:
+        settle -= 10
+
+    false_inflation = 0
+    false_inflation += max(0, move) * 12
+    false_inflation += fake * 0.22
+    false_inflation += run_prev * 0.18
+    false_inflation += under_env * 0.16
+    false_inflation += max(0, 60 - current_pressure) * 0.14
+    false_inflation += max(0, 60 - contact) * 0.12
+    false_inflation -= max(0, p2r - 70) * 0.18
+    false_inflation -= max(0, conv - 70) * 0.14
+
+    discounted_over = 0
+    discounted_over += max(0, -move) * 14
+    discounted_over += p2r * 0.18
+    discounted_over += conv * 0.15
+    discounted_over += stress * 0.12
+    discounted_over += traffic * 0.12
+    discounted_over += hard_hit * 0.08
+    discounted_over -= run_prev * 0.08
+    discounted_over -= bp_lock * 0.06
+
+    if move >= INFLATED_TOTAL_MOVE_RUNS:
+        if settle >= SETTLE_DOWN_MIN_SCORE and continuation <= CONTINUATION_MAX_FOR_FADE:
+            profile = "INFLATED_UNDER"
+        elif false_inflation >= FALSE_INFLATION_MIN_SCORE and continuation < CONTINUATION_OVER_MIN_SCORE:
+            profile = "FALSE_INFLATION_FADE"
+        elif continuation >= CONTINUATION_OVER_MIN_SCORE:
+            profile = "CONTINUATION_OVER"
+        else:
+            profile = "INFLATED_NO_BET"
+    elif move <= -DISCOUNTED_TOTAL_MOVE_RUNS:
+        profile = "DISCOUNTED_OVER" if discounted_over >= 55 else "DISCOUNTED_NO_BET"
+    else:
+        profile = "NEUTRAL_MARKET"
+
+    return {
+        "market_reaction_move": round(move, 2),
+        "market_reaction_reference": ref,
+        "settle_down_score": round(clamp(settle)),
+        "continuation_score": round(clamp(continuation)),
+        "false_inflation_score": round(clamp(false_inflation)),
+        "discounted_over_score": round(clamp(discounted_over)),
+        "market_reaction_profile": profile,
+    }
+
+
+def apply_market_reaction_scores(info, opening_total, first_seen_total, live_total, scores):
+    if not ENABLE_MARKET_REACTION_ENGINE:
+        return scores or {}
+    scores = dict(scores or {})
+    scores.update(market_reaction_scores(info, opening_total, first_seen_total, live_total, scores))
+    return scores
+
+
+def market_reaction_projection_adjustment(info, live_total, projected_total, scores):
+    """
+    V3.7.1: projection adjustment is intentionally conservative. It should help
+    expose market-reaction edges, not manufacture them. A side must have a real
+    score gap before the projection is moved.
+    """
+    if not ENABLE_MARKET_REACTION_ENGINE:
+        return projected_total
+    if live_total is None or projected_total is None:
+        return projected_total
+
+    profile = scores.get("market_reaction_profile", "")
+    move = safe_float(scores.get("market_reaction_move"), 0)
+    settle = safe_int(scores.get("settle_down_score"), 0)
+    cont = safe_int(scores.get("continuation_score"), 0)
+    disc = safe_int(scores.get("discounted_over_score"), 0)
+
+    adj = 0.0
+    if profile in ["INFLATED_UNDER", "FALSE_INFLATION_FADE"] and (settle - cont) >= MARKET_REACTION_MIN_SCORE_GAP:
+        adj = -min(MARKET_REACTION_MAX_PROJECTION_ADJ, max(0.4, move * 0.35 + (settle - cont) * 0.012))
+    elif profile == "CONTINUATION_OVER" and (cont - settle) >= MARKET_REACTION_MIN_SCORE_GAP:
+        adj = min(1.10, max(0.25, move * 0.12 + (cont - settle) * 0.008))
+    elif profile == "DISCOUNTED_OVER" and disc >= 55:
+        adj = min(MARKET_REACTION_MAX_PROJECTION_ADJ, max(0.35, abs(move) * 0.35 + disc * 0.008))
+
+    scores["market_reaction_projection_adjustment"] = round(adj, 2)
+    return round(projected_total + adj, 1)
+
+
+def market_reaction_scenario_label(profile):
+    labels = {
+        "DISCOUNTED_OVER": "Market Underreaction → Discounted OVER",
+        "INFLATED_UNDER": "Market Overreaction → Inflated UNDER",
+        "FALSE_INFLATION_FADE": "False Inflation Fade → UNDER",
+        "CONTINUATION_OVER": "True Run Environment → Continuation OVER",
+        "INFLATED_NO_BET": "Inflated Market → No Bet Unless Clear",
+        "DISCOUNTED_NO_BET": "Discounted Market → No Bet Unless Pressure Confirms",
+        "NEUTRAL_MARKET": "Neutral Market",
+    }
+    return labels.get(profile, "Market Reaction Evaluation")
+
+
 
 # -----------------------------
 # V3.4 lineup / bullpen / calibration helpers
 # -----------------------------
 
 _EV_CALIBRATION_CACHE = {"loaded_at": 0, "buckets": {}}
+
+
+
+def market_reaction_side_gate(side, edge, scores, info):
+    """
+    V3.7.1 hard gate. The Market Reaction Engine should classify the market
+    first, then the betting side must agree with that classification.
+
+    This prevents the old pressure engine from still firing OVERs into inflated
+    markets unless the game is a true continuation environment.
+    """
+    if not ENABLE_MARKET_REACTION_ENGINE:
+        return True, "market reaction disabled"
+
+    side = str(side or "").upper()
+    scores = scores or {}
+    profile = scores.get("market_reaction_profile", "NEUTRAL_MARKET")
+    move = safe_float(scores.get("market_reaction_move"), 0)
+    settle = safe_int(scores.get("settle_down_score"), 0)
+    cont = safe_int(scores.get("continuation_score"), 0)
+    p2r = safe_int(scores.get("pressure_to_runs"), 0)
+    conv = safe_int(scores.get("run_conversion"), 0)
+    traffic = safe_int(scores.get("traffic_conversion"), 0)
+    contact = safe_int(scores.get("contact_quality"), 0)
+    current_pressure = safe_int(scores.get("current_inning_pressure"), 0)
+    inning = safe_int((info or {}).get("inning"), 1)
+
+    if side == "OVER":
+        if profile in ["INFLATED_UNDER", "FALSE_INFLATION_FADE"]:
+            return False, f"market reaction blocks OVER: {profile} settle={settle} cont={cont}"
+
+        if INFLATED_OVER_REQUIRE_CONTINUATION and move >= INFLATED_TOTAL_MOVE_RUNS:
+            continuation_ok = (
+                profile == "CONTINUATION_OVER"
+                and cont >= CONTINUATION_OVER_MIN_SCORE
+                and abs(safe_float(edge, 0)) >= INFLATED_OVER_MIN_CONTINUATION_EDGE
+                and p2r >= INFLATED_OVER_MIN_P2R
+                and conv >= INFLATED_OVER_MIN_CONV
+            )
+            if not continuation_ok:
+                return False, f"inflated OVER blocked: move={move:+.1f} profile={profile} cont={cont} p2r={p2r} conv={conv}"
+
+        return True, "OVER agrees with market reaction"
+
+    if side == "UNDER":
+        if profile == "CONTINUATION_OVER":
+            return False, f"market reaction blocks UNDER: continuation={cont}"
+
+        if profile in ["INFLATED_UNDER", "FALSE_INFLATION_FADE"]:
+            fade_ok = (
+                move >= INFLATED_TOTAL_MOVE_RUNS
+                and inning >= INFLATED_UNDER_MIN_INNING
+                and safe_float(edge, 0) <= -INFLATED_UNDER_MIN_EDGE
+                and settle >= SETTLE_DOWN_MIN_SCORE
+                and (settle - cont) >= MARKET_REACTION_MIN_SCORE_GAP
+                and cont <= CONTINUATION_MAX_FOR_FADE
+                and current_pressure <= INFLATED_UNDER_ALLOW_CURRENT_PRESSURE
+                and contact <= INFLATED_UNDER_ALLOW_CONTACT
+                and traffic <= INFLATED_UNDER_MAX_TRAFFIC
+                and (p2r <= INFLATED_UNDER_MAX_P2R_SOFT or settle >= 85)
+            )
+            if not fade_ok:
+                return False, (
+                    f"inflated UNDER not clean enough: move={move:+.1f} settle={settle} cont={cont} "
+                    f"pressure={current_pressure} contact={contact} traffic={traffic} p2r={p2r}"
+                )
+            return True, "inflated UNDER agrees with market reaction"
+
+        return True, "classic UNDER path"
+
+    return True, "unknown side"
+
+
+def annotate_market_reaction_block(scores, reason):
+    scores = dict(scores or {})
+    scores["market_reaction_block_reason"] = reason
+    return scores
 
 
 def batter_order_slot_score(slot):
@@ -970,6 +1253,15 @@ def v33_baseball_quality_block_reason(info, opportunity):
     base_label = str((info.get("base_state") or {}).get("label", "")).lower()
     weak_traffic = ("bases empty" in base_label) or ("runner on 1st" in base_label and outs >= 2)
 
+    # V3.7.1: market-overreaction UNDER is a different animal than classic
+    # run-prevention UNDER. If the market-reaction gate approves it, do not
+    # force the old K/bullpen/run-prevention thresholds to also be perfect.
+    if side == "UNDER" and scores.get("market_reaction_profile") in ["INFLATED_UNDER", "FALSE_INFLATION_FADE"]:
+        ok, reason = market_reaction_side_gate("UNDER", opportunity.get("edge"), scores, info)
+        if ok:
+            return None
+        return reason
+
     if side == "OVER":
         if inning < EARLY_OVER_MIN_INNING and not (p2r >= EARLY_OVER_MIN_P2R and tconv >= EARLY_OVER_MIN_TRAFFIC and stress >= EARLY_OVER_MIN_STRESS):
             return "baseball block: early OVER lacks elite pressure/traffic/stress"
@@ -1151,7 +1443,7 @@ def post_tracking_event(event_type, payload):
     body = {
         "event_type": event_type,
         "sent_at": now_local().isoformat(),
-        "source": "SHIFT_MLB_V3_6_REPORTING",
+        "source": "SHIFT_MLB_V3_7_1_MARKET_REACTION",
         "payload": payload,
     }
     headers = {"Content-Type": "application/json"}
@@ -2914,6 +3206,10 @@ def v26_final_betnow_gate(state_game, info, market_context, opportunity):
         return False, f"ignored book blocked from final STRIKE: {recommended_book}"
     if REQUIRE_PLAYABLE_BOOK_FOR_STRIKE and USER_PLAYABLE_BOOKS and (not recommended_book or not is_user_playable_book(recommended_book)):
         return False, "no playable BetMGM/user-book line available for final STRIKE"
+
+    reaction_ok, reaction_reason = market_reaction_side_gate(opportunity.get("side"), opportunity.get("edge"), opportunity.get("scores", {}), info)
+    if not reaction_ok:
+        return False, reaction_reason
 
     market_first_block = v33_market_first_block_reason(info, market_context, opportunity)
     if market_first_block:
@@ -5396,6 +5692,12 @@ def projection_score(side, edge, scores):
         score += scores.get("over_value", 0) * 0.18
         score += max(0, scores.get("predictive_market_move", 0)) * 0.18
         score += scores.get("pre_run_over_watch", 0) * 0.12
+        if scores.get("market_reaction_profile") == "DISCOUNTED_OVER":
+            score += scores.get("discounted_over_score", 0) * 0.20
+        if scores.get("market_reaction_profile") == "CONTINUATION_OVER":
+            score += scores.get("continuation_score", 0) * 0.12
+        if scores.get("market_reaction_profile") in ["INFLATED_UNDER", "FALSE_INFLATION_FADE"]:
+            score -= scores.get("settle_down_score", 0) * 0.14
 
         # V2.3.1 winner-pattern boosts.
         score += scores.get("market_lag", 0) * 0.10
@@ -5410,6 +5712,11 @@ def projection_score(side, edge, scores):
         score += scores.get("run_prevention", 0) * 0.20
         score += max(0, -scores.get("predictive_market_move", 0)) * 0.15
         score += scores.get("under_environment", 0) * 0.15
+        if scores.get("market_reaction_profile") in ["INFLATED_UNDER", "FALSE_INFLATION_FADE"]:
+            score += scores.get("settle_down_score", 0) * 0.22
+            score += scores.get("false_inflation_score", 0) * 0.10
+        if scores.get("market_reaction_profile") == "CONTINUATION_OVER":
+            score -= scores.get("continuation_score", 0) * 0.18
 
         # V2.3.1 under-side intelligence.
         score += scores.get("market_lag", 0) * 0.08
@@ -5438,8 +5745,11 @@ def confirmation_score(side, info, scores):
             + scores.get("lineup_pressure", 0) * 0.05
             + scores.get("traffic_conversion", 0) * 0.08
             + scores.get("hard_hit_efficiency", 0) * 0.06
+            + (scores.get("continuation_score", 0) * 0.08 if scores.get("market_reaction_profile") == "CONTINUATION_OVER" else 0)
+            + (scores.get("discounted_over_score", 0) * 0.06 if scores.get("market_reaction_profile") == "DISCOUNTED_OVER" else 0)
             - scores.get("strikeout_environment", 0) * 0.08
             - scores.get("bullpen_lockdown", 0) * 0.07
+            - (scores.get("settle_down_score", 0) * 0.10 if scores.get("market_reaction_profile") in ["INFLATED_UNDER", "FALSE_INFLATION_FADE"] else 0)
         )
 
         # Late overs need stronger current or near-current evidence.
@@ -5479,8 +5789,11 @@ def confirmation_score(side, info, scores):
             + scores.get("strikeout_environment", 0) * 0.12
             + scores.get("bullpen_lockdown", 0) * 0.10
             + scores.get("hard_hit_under_support", 0) * 0.08
+            + (scores.get("settle_down_score", 0) * 0.18 if scores.get("market_reaction_profile") in ["INFLATED_UNDER", "FALSE_INFLATION_FADE"] else 0)
+            + (scores.get("false_inflation_score", 0) * 0.08 if scores.get("market_reaction_profile") == "FALSE_INFLATION_FADE" else 0)
             - scores.get("traffic_conversion", 0) * 0.08
             - scores.get("hard_hit_efficiency", 0) * 0.06
+            - (scores.get("continuation_score", 0) * 0.14 if scores.get("market_reaction_profile") == "CONTINUATION_OVER" else 0)
         )
 
         if inning >= 7:
@@ -5687,6 +6000,20 @@ def action_from_confidence(side, confidence, edge, scores=None):
     min_edge = MIN_UNDER_STRIKE_EDGE_RUNS
     min_confirm = MIN_LATE_UNDER_CONFIRMATION_FOR_STRIKE if inning >= 7 else MIN_UNDER_CONFIRMATION_FOR_STRIKE
 
+    inflated_fade_ready = (
+        ENABLE_MARKET_REACTION_ENGINE
+        and scores.get("market_reaction_profile") in ["INFLATED_UNDER", "FALSE_INFLATION_FADE"]
+        and safe_float(scores.get("market_reaction_move"), 0) >= INFLATED_TOTAL_MOVE_RUNS
+        and inning >= INFLATED_UNDER_MIN_INNING
+        and edge <= -INFLATED_UNDER_MIN_EDGE
+        and scores.get("settle_down_score", 0) >= SETTLE_DOWN_MIN_SCORE
+        and scores.get("continuation_score", 100) <= CONTINUATION_MAX_FOR_FADE
+        and scores.get("current_inning_pressure", 0) <= INFLATED_UNDER_ALLOW_CURRENT_PRESSURE
+        and scores.get("contact_quality", 0) <= INFLATED_UNDER_ALLOW_CONTACT
+        and confirmation >= 58
+        and projection >= 58
+    )
+
     strike_ready = (
         edge <= -min_edge
         and projection >= 62
@@ -5700,7 +6027,7 @@ def action_from_confidence(side, confidence, edge, scores=None):
             or inning <= 4
         )
     )
-    if strike_ready and not extreme_blocked:
+    if (strike_ready or inflated_fade_ready) and not extreme_blocked:
         return "STRIKE"
 
     watch_ready = (
@@ -5827,6 +6154,32 @@ def classify_scenario(
     mp = market_pressure(opening, live)
     total_runs = info["total_runs"]
 
+    if ENABLE_MARKET_REACTION_ENGINE:
+        temp_scores = {
+            "current_inning_pressure": current_pressure,
+            "remaining_opportunity": remaining_opp,
+            "pitcher_stress": stress,
+            "dominance": dominance,
+            "contact_quality": contact,
+            "contact_trend": contact_trend,
+            "lineup_pressure": lineup,
+            "bullpen_risk": bullpen,
+            "starter_exit_probability": starter_exit,
+            "fake_pressure": fake_pressure,
+            "market_resistance": market_resistance,
+            "blowout_kill": blowout_kill,
+            "under_environment": under_environment,
+            "strikeout_environment": strikeout_environment,
+            "bullpen_lockdown": bullpen_lockdown,
+            "traffic_conversion": traffic_conversion,
+            "hard_hit_efficiency": hard_hit_efficiency,
+            "hard_hit_under_support": hard_hit_under_support,
+        }
+        reaction = market_reaction_scores(info, opening, opening, live, temp_scores)
+        profile = reaction.get("market_reaction_profile")
+        if profile in ["DISCOUNTED_OVER", "INFLATED_UNDER", "FALSE_INFLATION_FADE", "CONTINUATION_OVER"]:
+            return market_reaction_scenario_label(profile)
+
     # V2.2.1 predictive paths: watch before score/market fully moves.
     # These are not automatic bets; run conversion/prevention determines WATCH vs STRIKE later.
     if contact_trend >= 65 and stress >= 50 and market_resistance >= 0:
@@ -5897,9 +6250,9 @@ def classify_scenario(
 
 def scenario_bias(scenario):
     # WATCH ONLY is intentionally not an automatic OVER bias.
-    if any(x in scenario for x in ["Under", "Control", "Dead Contact", "Fake Pressure", "Inflated", "Blowout"]):
+    if any(x in scenario for x in ["Under", "UNDER", "Control", "Dead Contact", "Fake Pressure", "Inflated", "Blowout", "Overreaction", "Fade"]):
         return "UNDER"
-    if any(x in scenario for x in ["Over Opportunity", "Collapse", "Lineup", "Bullpen", "Over Continuation"]):
+    if any(x in scenario for x in ["Over Opportunity", "OVER", "Collapse", "Lineup", "Bullpen", "Over Continuation", "Underreaction", "Continuation OVER"]):
         return "OVER"
     return "NONE"
 
@@ -5980,12 +6333,12 @@ def price_penalty_ticks(price):
 
 def best_available_for_side(book_totals, side):
     """
-    Raw best line. For OVER, lower point is best. For UNDER, higher point is best.
-    Keeps price inside the allowed playable window.
+    Raw best playable line. For OVER, lower point is best. For UNDER, higher
+    point is best. V3.7.1 filters to non-ignored and user-playable books.
     """
     side = str(side or "").upper()
     candidates = []
-    for b in book_totals or []:
+    for b in remove_ignored_book_totals(book_totals or []):
         point = safe_float(b.get("point"), None)
         if point is None:
             continue
@@ -5993,10 +6346,11 @@ def best_available_for_side(book_totals, side):
         if not book_price_ok(price):
             continue
         candidates.append({**b, "side_price": price})
-    candidates = playable_book_filter_candidates(candidates)
+
     candidates = playable_book_filter_candidates(candidates)
     if not candidates:
         return None
+
     if side == "OVER":
         return sorted(candidates, key=lambda x: (safe_float(x.get("point"), 99), price_penalty_ticks(x.get("side_price"))))[0]
     if side == "UNDER":
@@ -6006,13 +6360,14 @@ def best_available_for_side(book_totals, side):
 
 def price_adjusted_best_available_for_side(book_totals, side):
     """
-    Practical best line for real apps. Sometimes a half-run worse number at a much
-    better price is more playable than the raw best number at the edge of the price cap.
-    PRICE_ADJUSTED_HALF_RUN_VALUE controls the tradeoff.
+    Practical best line for real apps. V3.7.1 hardens this so the selected
+    line must come from a user-playable book when REQUIRE_PLAYABLE_BOOK_FOR_STRIKE
+    is enabled. This prevents DraftKings/FanDuel/Caesars from becoming the
+    recommended line when the user can only act at BetMGM.
     """
     side = str(side or "").upper()
     candidates = []
-    for b in book_totals or []:
+    for b in remove_ignored_book_totals(book_totals or []):
         point = safe_float(b.get("point"), None)
         if point is None:
             continue
@@ -6020,20 +6375,25 @@ def price_adjusted_best_available_for_side(book_totals, side):
         if not book_price_ok(price):
             continue
         candidates.append({**b, "side_price": price})
+
+    candidates = playable_book_filter_candidates(candidates)
     if not candidates:
         return None
+
     if side == "OVER":
         best_raw_point = min(safe_float(c.get("point"), 99) for c in candidates)
         def score(c):
             half_runs_worse = max(0, (safe_float(c.get("point"), best_raw_point) - best_raw_point) / 0.5)
             return half_runs_worse * PRICE_ADJUSTED_HALF_RUN_VALUE + price_penalty_ticks(c.get("side_price"))
         return sorted(candidates, key=lambda c: (score(c), safe_float(c.get("point"), 99)))[0]
+
     if side == "UNDER":
         best_raw_point = max(safe_float(c.get("point"), -99) for c in candidates)
         def score(c):
             half_runs_worse = max(0, (best_raw_point - safe_float(c.get("point"), best_raw_point)) / 0.5)
             return half_runs_worse * PRICE_ADJUSTED_HALF_RUN_VALUE + price_penalty_ticks(c.get("side_price"))
         return sorted(candidates, key=lambda c: (score(c), -safe_float(c.get("point"), -99)))[0]
+
     return None
 
 
@@ -6341,157 +6701,102 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
     if live is None:
         return None
 
+    base_scores = dict(scores or {})
     projected_total = adjusted_projection_for_time(info, live, projected_total)
+    projected_total = market_reaction_projection_adjustment(info, live, projected_total, base_scores)
     edge = round(projected_total - live, 1)
     bias = scenario_bias(scenario)
 
     candidates = []
 
-    if edge >= MIN_WATCH_EDGE_RUNS and price_ok(over_price, edge):
-        evidence = live_evidence_report(info, p, q, traffic, scores, scenario, side="OVER")
-        if evidence["ok"]:
-            scores["inning"] = safe_int(info.get("inning", 1), 1)
-            scores = apply_winner_pattern_enhancements(state, info, "OVER", scores, live, projected_total)
-            scores["projection_score"] = projection_score("OVER", edge, scores)
-            scores["confirmation_score"] = confirmation_score("OVER", info, scores)
-            confidence = confidence_score("OVER", edge, scenario, scores, evidence, scores.get("market_resistance", 0))
-            confidence = min(confidence, max(scores["projection_score"], scores["confirmation_score"]))
-            action = action_from_confidence("OVER", confidence, edge, scores)
-            if action != "NO_PLAY":
-                candidates.append({
-                    "market_type": "Full Game Total",
-                    "side": "OVER",
-                    "line": live,
-                    "price": over_price,
-                    "edge": edge,
-                    "edge_grade": edge_grade(edge),
-                    "scenario": clean_scenario_label(scenario),
-                    "scores": scores,
-                    "projected_total": projected_total,
-            "projection": projected_total,
-                    "evidence": evidence,
-                    "confidence": confidence,
-                    "action": action,
-                })
+    def add_candidate(side, line, price, cand_edge, cand_scenario, force_action=None):
+        nonlocal candidates
+        side_scores = dict(base_scores)
+        gate_ok, gate_reason = market_reaction_side_gate(side, cand_edge, side_scores, info)
+        if not gate_ok:
+            side_scores = annotate_market_reaction_block(side_scores, gate_reason)
+            return
 
-    if edge <= -MIN_WATCH_EDGE_RUNS and price_ok(under_price, abs(edge)):
-        evidence = live_evidence_report(info, p, q, traffic, scores, scenario, side="UNDER")
-        if evidence["ok"]:
-            scores["inning"] = safe_int(info.get("inning", 1), 1)
-            scores = apply_winner_pattern_enhancements(state, info, "UNDER", scores, live, projected_total)
-            scores["projection_score"] = projection_score("UNDER", edge, scores)
-            scores["confirmation_score"] = confirmation_score("UNDER", info, scores)
-            confidence = confidence_score("UNDER", edge, scenario, scores, evidence, scores.get("market_resistance", 0))
-            confidence = min(confidence, max(scores["projection_score"], scores["confirmation_score"]))
-            action = action_from_confidence("UNDER", confidence, edge, scores)
-            if action != "NO_PLAY":
-                candidates.append({
-                    "market_type": "Full Game Total",
-                    "side": "UNDER",
-                    "line": live,
-                    "price": under_price,
-                    "edge": edge,
-                    "edge_grade": edge_grade(edge),
-                    "scenario": clean_scenario_label(scenario),
-                    "scores": scores,
-                    "projected_total": projected_total,
+        evidence = live_evidence_report(info, p, q, traffic, side_scores, cand_scenario, side=side)
+        if not evidence["ok"]:
+            return
+
+        side_scores["inning"] = safe_int(info.get("inning", 1), 1)
+        side_scores = apply_winner_pattern_enhancements(state, info, side, side_scores, line, projected_total)
+        side_scores["projection_score"] = projection_score(side, cand_edge, side_scores)
+        side_scores["confirmation_score"] = confirmation_score(side, info, side_scores)
+        confidence = confidence_score(side, cand_edge, cand_scenario, side_scores, evidence, side_scores.get("market_resistance", 0))
+        confidence = min(confidence, max(side_scores["projection_score"], side_scores["confirmation_score"]))
+        action = force_action or action_from_confidence(side, confidence, cand_edge, side_scores)
+        if action == "NO_PLAY":
+            return
+
+        candidates.append({
+            "market_type": "Full Game Total",
+            "side": side,
+            "line": line,
+            "price": price,
+            "edge": round(cand_edge, 1),
+            "edge_grade": edge_grade(cand_edge),
+            "scenario": clean_scenario_label(cand_scenario),
+            "scores": side_scores,
+            "projected_total": projected_total,
             "projection": projected_total,
-                    "evidence": evidence,
-                    "confidence": confidence,
-                    "action": action,
-                })
+            "evidence": evidence,
+            "confidence": confidence,
+            "action": action,
+        })
+
+    # Standard OVER path.
+    if edge >= MIN_WATCH_EDGE_RUNS and price_ok(over_price, edge):
+        add_candidate("OVER", live, over_price, edge, scenario)
+
+    # Standard UNDER path.
+    if edge <= -MIN_WATCH_EDGE_RUNS and price_ok(under_price, abs(edge)):
+        add_candidate("UNDER", live, under_price, edge, scenario)
+
+    # V3.7.1 Inflated UNDER / False Inflation Fade:
+    # This is a market-overreaction path. It can create an UNDER even when the
+    # old classic UNDER engine would have been too tight, but only if the
+    # side-gate says the market reaction is genuinely settling.
+    if ENABLE_MARKET_REACTION_ENGINE and base_scores.get("market_reaction_profile") in ["INFLATED_UNDER", "FALSE_INFLATION_FADE"]:
+        if edge <= -INFLATED_UNDER_MIN_EDGE and price_ok(under_price, abs(edge)):
+            add_candidate(
+                "UNDER",
+                live,
+                under_price,
+                edge,
+                market_reaction_scenario_label(base_scores.get("market_reaction_profile")),
+            )
 
     # Predictive market move WATCH: pressure building before market fully moves.
     if SEND_WATCH_ALERTS and not candidates:
-        predictive = scores.get("predictive_market_move", 0)
+        predictive = base_scores.get("predictive_market_move", 0)
         if predictive >= MIN_PREDICTIVE_MARKET_MOVE_FOR_WATCH and price_ok(over_price, abs(edge) if edge else MIN_WATCH_EDGE_RUNS):
-            evidence = live_evidence_report(info, p, q, traffic, scores, "Predictive Market Move → Over Watch", side="OVER")
-            if evidence["ok"]:
-                watch_edge = max(edge, MIN_WATCH_EDGE_RUNS)
-                scores["inning"] = safe_int(info.get("inning", 1), 1)
-                scores = apply_winner_pattern_enhancements(state, info, "OVER", scores, live, projected_total)
-                scores["projection_score"] = projection_score("OVER", watch_edge, scores)
-                scores["confirmation_score"] = confirmation_score("OVER", info, scores)
-                confidence = confidence_score("OVER", watch_edge, "Predictive Market Move → Over Watch", scores, evidence, scores.get("market_resistance", 0))
-                confidence = min(confidence, max(scores["projection_score"], scores["confirmation_score"]))
-                if confidence >= MIN_WATCH_CONFIDENCE:
-                    candidates.append({
-                        "market_type": "Full Game Total",
-                        "side": "OVER",
-                        "line": live,
-                        "price": over_price,
-                        "edge": round(watch_edge, 1),
-                        "edge_grade": "Watch",
-                        "scenario": clean_scenario_label("Predictive Market Move → Over Watch"),
-                        "scores": scores,
-                        "projected_total": projected_total,
-            "projection": projected_total,
-                        "evidence": evidence,
-                        "confidence": confidence,
-                        "action": "WATCH",
-                    })
+            watch_edge = max(edge, MIN_WATCH_EDGE_RUNS)
+            add_candidate("OVER", live, over_price, watch_edge, "Predictive Market Move → Over Watch", force_action="WATCH")
         elif predictive <= -MIN_PREDICTIVE_MARKET_MOVE_FOR_WATCH and price_ok(under_price, abs(edge) if edge else MIN_WATCH_EDGE_RUNS):
-            evidence = live_evidence_report(info, p, q, traffic, scores, "Predictive Market Move → Under Watch", side="UNDER")
-            if evidence["ok"]:
-                watch_edge = min(edge, -MIN_WATCH_EDGE_RUNS)
-                scores["inning"] = safe_int(info.get("inning", 1), 1)
-                scores = apply_winner_pattern_enhancements(state, info, "UNDER", scores, live, projected_total)
-                scores["projection_score"] = projection_score("UNDER", watch_edge, scores)
-                scores["confirmation_score"] = confirmation_score("UNDER", info, scores)
-                confidence = confidence_score("UNDER", watch_edge, "Predictive Market Move → Under Watch", scores, evidence, scores.get("market_resistance", 0))
-                confidence = min(confidence, max(scores["projection_score"], scores["confirmation_score"]))
-                if confidence >= MIN_WATCH_CONFIDENCE:
-                    candidates.append({
-                        "market_type": "Full Game Total",
-                        "side": "UNDER",
-                        "line": live,
-                        "price": under_price,
-                        "edge": round(watch_edge, 1),
-                        "edge_grade": "Watch",
-                        "scenario": clean_scenario_label("Predictive Market Move → Under Watch"),
-                        "scores": scores,
-                        "projected_total": projected_total,
-            "projection": projected_total,
-                        "evidence": evidence,
-                        "confidence": confidence,
-                        "action": "WATCH",
-                    })
+            watch_edge = min(edge, -MIN_WATCH_EDGE_RUNS)
+            add_candidate("UNDER", live, under_price, watch_edge, "Predictive Market Move → Under Watch", force_action="WATCH")
 
     # Dedicated V2.2.1 Pre-Run OVER WATCH:
-    # This tries to catch the market move before runs fully arrive.
-    if SEND_WATCH_ALERTS and not candidates and scores.get("pre_run_over_watch", 0) >= PRE_RUN_OVER_WATCH_SCORE:
-        evidence = live_evidence_report(info, p, q, traffic, scores, "Pre-Run Pressure Build → Over Watch", side="OVER")
-        if evidence["ok"]:
-            watch_edge = max(edge, MIN_WATCH_EDGE_RUNS)
-            scores["inning"] = safe_int(info.get("inning", 1), 1)
-            scores = apply_winner_pattern_enhancements(state, info, "OVER", scores, live, projected_total)
-            scores["projection_score"] = projection_score("OVER", watch_edge, scores)
-            scores["confirmation_score"] = confirmation_score("OVER", info, scores)
-            confidence = confidence_score("OVER", watch_edge, "Pre-Run Pressure Build → Over Watch", scores, evidence, scores.get("market_resistance", 0))
-            confidence = min(confidence, max(scores["projection_score"], scores["confirmation_score"]))
-            if confidence >= MIN_WATCH_CONFIDENCE and scores.get("pressure_to_runs", 0) >= MIN_OVER_RUN_CONVERSION_FOR_WATCH:
-                candidates.append({
-                    "market_type": "Full Game Total",
-                    "side": "OVER",
-                    "line": live,
-                    "price": over_price,
-                    "edge": round(watch_edge, 1),
-                    "edge_grade": "Watch",
-                    "scenario": clean_scenario_label("Pre-Run Pressure Build → Over Watch"),
-                    "scores": scores,
-                    "projected_total": projected_total,
-            "projection": projected_total,
-                    "evidence": evidence,
-                    "confidence": confidence,
-                    "action": "WATCH",
-                })
+    if SEND_WATCH_ALERTS and not candidates and base_scores.get("pre_run_over_watch", 0) >= PRE_RUN_OVER_WATCH_SCORE:
+        watch_edge = max(edge, MIN_WATCH_EDGE_RUNS)
+        if base_scores.get("pressure_to_runs", 0) >= MIN_OVER_RUN_CONVERSION_FOR_WATCH:
+            add_candidate("OVER", live, over_price, watch_edge, "Pre-Run Pressure Build → Over Watch", force_action="WATCH")
 
     if not candidates:
         return None
 
     # Scenario bias can filter weak conflicts, but not strong confidence/edge.
     filtered = []
+    seen = set()
     for c in candidates:
+        key = (c.get("side"), c.get("line"), c.get("scenario"), c.get("action"))
+        if key in seen:
+            continue
+        seen.add(key)
+
         if bias != "NONE" and bias != c["side"] and abs(c["edge"]) < STRONG_EDGE_RUNS and c["confidence"] < 72:
             continue
         if c["action"] == "WATCH" and not SEND_WATCH_ALERTS:
@@ -6501,8 +6806,18 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
     if not filtered:
         return None
 
-    # Prefer STRIKE over WATCH, then highest confidence.
-    filtered.sort(key=lambda x: (1 if x["action"] == "STRIKE" else 0, x["confidence"], abs(x["edge"])), reverse=True)
+    # Prefer STRIKE over WATCH, then highest confidence, then strongest market-reaction fit.
+    def rank(c):
+        s = c.get("scores", {}) or {}
+        side = c.get("side")
+        profile_bonus = 0
+        if side == "OVER" and s.get("market_reaction_profile") in ["DISCOUNTED_OVER", "CONTINUATION_OVER"]:
+            profile_bonus += 8
+        if side == "UNDER" and s.get("market_reaction_profile") in ["INFLATED_UNDER", "FALSE_INFLATION_FADE"]:
+            profile_bonus += 8
+        return (1 if c["action"] == "STRIKE" else 0, c["confidence"], profile_bonus, abs(c["edge"]))
+
+    filtered.sort(key=rank, reverse=True)
     return filtered[0]
 
 
@@ -6611,6 +6926,14 @@ def describe_reasons(info, p, q, traffic, hitters, scores, scenario):
         reasons.append(f"Market resistance supports OVER (+{scores['market_resistance']})")
     elif scores.get("market_resistance", 0) <= -25:
         reasons.append(f"Market resistance supports UNDER ({scores['market_resistance']})")
+
+    if scores.get("market_reaction_profile"):
+        reasons.append(
+            f"Market reaction: {scores.get('market_reaction_profile')} | "
+            f"move {safe_float(scores.get('market_reaction_move'), 0):+.1f} | "
+            f"settle {scores.get('settle_down_score', 0)}/100 | "
+            f"continuation {scores.get('continuation_score', 0)}/100"
+        )
 
     if q["velo_drop"] >= 1.0:
         reasons.append(f"Velocity drop detected: {q['velo_drop']} mph")
@@ -7126,8 +7449,12 @@ def main():
                     "traffic_conversion": traffic_conversion_pressure,
                     "hard_hit_efficiency": hard_hit_efficiency,
                     "hard_hit_under_support": hard_hit_under_support,
+                    "opening_total": opening_total,
+                    "first_seen_total": first_seen_total,
+                    "true_opening_total": true_opening_total,
                     "live_total": live_total,
                 }
+                scores = apply_market_reaction_scores(info, opening_total, first_seen_total, live_total, scores)
 
                 if info["status"] == "Live":
                     any_live = True
@@ -7201,7 +7528,7 @@ def main():
                     f"Score {info['away_runs']}-{info['home_runs']} | Base {info['base_state']['label']} {info['outs']} out | "
                     f"Open {opening_total} Live {live_total} Projected {projected_total} EFR {expected_future} | "
                     f"Books {market_context_for_state.get('book_count', 0)} Cons {market_context_for_state.get('consensus_total')} BestPlayable {market_context_for_state.get('best_book')} {market_context_for_state.get('best_available_total')} RecPlayable {market_context_for_state.get('price_adjusted_best_book')} {market_context_for_state.get('price_adjusted_best_total')} Vel {market_context_for_state.get('line_velocity')} MktConf {market_context_for_state.get('market_confirmation_score')} | "
-                    f"Scenario {scenario} | "
+                    f"Scenario {scenario} | Reaction {scores.get('market_reaction_profile')} Move {scores.get('market_reaction_move')} Settle {scores.get('settle_down_score')} Cont {scores.get('continuation_score')} FalseInfl {scores.get('false_inflation_score')} | "
                     f"CIP {current_pressure} RO {remaining_opp} Stress {stress} Dom {dominance} Contact {contact} "
                     f"Trend {contact_trend} Lineup {lineup_pressure} Bullpen {bullpen} Exit {starter_exit} TTO {tto} "
                     f"Fake {fake_pressure} UnderEnv {under_env} Conv {run_conversion} Prev {run_prevention} KEnv {strikeout_env} BPLock {bullpen_lockdown} TConv {traffic_conversion_pressure} HHEff {hard_hit_efficiency} HHUnder {hard_hit_under_support} PredMove {predictive_move} MarketRes {market_res} Supp {suppression} FalseDom {false_dom} | "
