@@ -59,10 +59,10 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # SHIFT deployment identity / anti-confusion banner
 # ---------------------------------------------------------------------------
-APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.6.1")
-APP_MODE = "REPORTING + BETMGM PRACTICAL MODE"
+APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.6.2")
+APP_MODE = "REPORTING + BETMGM PRACTICAL MODE + MAJOR MARKET FILTER"
 APP_BUILD_LABEL = f"SHIFT MLB {APP_VERSION} {APP_MODE}"
-DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-email-reporting-betmgm")
+DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-major-market-filter-no-mybookie")
 RUN_EMAIL_TEST_ON_START = os.getenv("RUN_EMAIL_TEST_ON_START", "false").lower() == "true"
 
 TZ = ZoneInfo("America/Phoenix")
@@ -581,21 +581,47 @@ def is_ignored_recommendation_book(book):
     return book_matches(book, IGNORE_RECOMMENDATION_BOOKS)
 
 
+def is_market_reference_book(book):
+    """
+    V3.6.2: true-market math should use major public books only.
+    Ignored/offshore books are never allowed to influence consensus, velocity,
+    best line, EV, or recommendation text.
+    """
+    if is_ignored_recommendation_book(book):
+        return False
+    if MARKET_REFERENCE_BOOKS:
+        return book_matches(book, MARKET_REFERENCE_BOOKS)
+    return True
+
+
+def remove_ignored_book_totals(book_totals):
+    """Remove books like MyBookie from all market math and app logic."""
+    return [b for b in (book_totals or []) if not is_ignored_recommendation_book(b.get("book"))]
+
+
 def playable_book_filter_candidates(candidates):
     """Return candidates from books the user can actually bet."""
     if not candidates:
         return []
+    clean = [c for c in candidates if not is_ignored_recommendation_book(c.get("book"))]
     if USER_PLAYABLE_BOOKS:
-        return [c for c in candidates if is_user_playable_book(c.get("book"))]
-    return [c for c in candidates if not is_ignored_recommendation_book(c.get("book"))]
+        return [c for c in clean if is_user_playable_book(c.get("book"))]
+    return clean
 
 
 def market_reference_book_totals(book_totals):
-    """Major-market subset for confirmation; falls back to all books if unavailable."""
-    if not book_totals or not MARKET_REFERENCE_BOOKS:
-        return book_totals or []
-    refs = [b for b in book_totals if book_matches(b.get("book"), MARKET_REFERENCE_BOOKS)]
-    return refs or book_totals or []
+    """
+    Major-market subset for confirmation.
+    V3.6.2 never falls back to ignored/offshore books. If configured major
+    books are unavailable, fall back only to non-ignored books.
+    """
+    clean = remove_ignored_book_totals(book_totals)
+    if not clean:
+        return []
+    if not MARKET_REFERENCE_BOOKS:
+        return clean
+    refs = [b for b in clean if is_market_reference_book(b.get("book"))]
+    return refs or clean
 
 
 def market_discount_value(first_seen_total, live_total):
@@ -1054,6 +1080,15 @@ def apply_price_adjusted_best_line(info, market_context, opportunity):
     if not price_ok(best_price, abs(new_edge)):
         opportunity["action"] = "NO_PLAY"
         opportunity["app_status"] = "NO BET — best available price outside playable range"
+        return opportunity
+
+    if is_ignored_recommendation_book(best_book):
+        opportunity["action"] = "NO_PLAY"
+        opportunity["app_status"] = f"NO BET — ignored book removed from recommendation ({best_book})"
+        return opportunity
+    if REQUIRE_PLAYABLE_BOOK_FOR_STRIKE and USER_PLAYABLE_BOOKS and not is_user_playable_book(best_book):
+        opportunity["action"] = "NO_PLAY"
+        opportunity["app_status"] = "NO BET — no playable BetMGM/user-book line available"
         return opportunity
 
     ev = expected_value_per_unit(side, new_edge, best_price)
@@ -2874,6 +2909,12 @@ def v26_final_betnow_gate(state_game, info, market_context, opportunity):
     if V26_REJECT_STALE_STATUS and str(info.get("status", "")).lower() != "live":
         return False, "game is not live"
 
+    recommended_book = opportunity.get("recommended_book") or market_context.get("recommended_book") or market_context.get("price_adjusted_best_book") or market_context.get("best_book")
+    if recommended_book and is_ignored_recommendation_book(recommended_book):
+        return False, f"ignored book blocked from final STRIKE: {recommended_book}"
+    if REQUIRE_PLAYABLE_BOOK_FOR_STRIKE and USER_PLAYABLE_BOOKS and (not recommended_book or not is_user_playable_book(recommended_book)):
+        return False, "no playable BetMGM/user-book line available for final STRIKE"
+
     market_first_block = v33_market_first_block_reason(info, market_context, opportunity)
     if market_first_block:
         return False, market_first_block
@@ -3000,7 +3041,9 @@ def format_bet_now_sms(label, info, market_context, opportunity):
     lineup_score = lineup_pocket_score(info)
     bullpen_score = bullpen_context_score(info, scores)
     decay_score = opportunity.get("confidence_decay_score")
-    book = opportunity.get("recommended_book") or market_context.get("recommended_book") or market_context.get("price_adjusted_best_book") or market_context.get("best_book") or "Best app"
+    book = opportunity.get("recommended_book") or market_context.get("recommended_book") or market_context.get("price_adjusted_best_book") or "Configured app"
+    if book and is_ignored_recommendation_book(book):
+        book = "BLOCKED_BOOK_FILTER_ERROR"
     first_seen = market_context.get("first_seen_total") or market_context.get("opening_total")
     true_open = market_context.get("true_opening_total") or "unknown"
     age = market_context.get("best_line_age_seconds")
@@ -6044,6 +6087,9 @@ def find_markets(odds_events, home, away):
 
         for book in ev.get("bookmakers", []):
             book_title = book.get("title") or book.get("key") or "Unknown"
+            if is_ignored_recommendation_book(book_title):
+                print(f"BOOK FILTER | ignored book removed from market math: {book_title}")
+                continue
             book_key = normalize_book_key(book_title)
             for market in book.get("markets", []):
                 key = market.get("key")
@@ -6092,6 +6138,7 @@ def find_markets(odds_events, home, away):
             "under_price": primary.get("under_price"),
             "book": primary.get("book"),
         }
+        book_totals = remove_ignored_book_totals(book_totals)
         result["book_totals"] = book_totals
         result["book_totals_by_name"] = {b.get("book_key"): b for b in book_totals}
         result["market"] = market_snapshot(book_totals, result["total"].get("point"))
@@ -6109,7 +6156,10 @@ def update_line_velocity_state(state_game, markets):
     """
     if not ENABLE_MARKET_INTELLIGENCE:
         return {"line_velocity": 0, "line_velocity_abs": 0, "line_direction": "flat", "history_count": 0, "book_velocities": {}, "leading_book": None}
-    point = safe_float(((markets or {}).get("total") or {}).get("point"), None)
+    market_books = market_reference_book_totals((markets or {}).get("book_totals", []) or [])
+    point = safe_float(((markets or {}).get("market") or {}).get("consensus_total"), None)
+    if point is None:
+        point = safe_float(((markets or {}).get("total") or {}).get("point"), None)
     if point is None:
         return {"line_velocity": 0, "line_velocity_abs": 0, "line_direction": "unknown", "history_count": 0, "book_velocities": {}, "leading_book": None}
     now_ts = time.time()
@@ -6129,7 +6179,7 @@ def update_line_velocity_state(state_game, markets):
     # Per-book velocities.
     book_hist = state_game.setdefault("book_line_history", {})
     book_velocities = {}
-    for b in (markets or {}).get("book_totals", []) or []:
+    for b in market_books:
         key = b.get("book_key") or normalize_book_key(b.get("book"))
         b_point = safe_float(b.get("point"), None)
         if not key or b_point is None:
@@ -7150,7 +7200,7 @@ def main():
                     f"{mode} | {label} | {info['inning_state']} {info['inning']} | "
                     f"Score {info['away_runs']}-{info['home_runs']} | Base {info['base_state']['label']} {info['outs']} out | "
                     f"Open {opening_total} Live {live_total} Projected {projected_total} EFR {expected_future} | "
-                    f"Books {market_context_for_state.get('book_count', 0)} Cons {market_context_for_state.get('consensus_total')} Best {market_context_for_state.get('best_book')} {market_context_for_state.get('best_available_total')} Vel {market_context_for_state.get('line_velocity')} MktConf {market_context_for_state.get('market_confirmation_score')} | "
+                    f"Books {market_context_for_state.get('book_count', 0)} Cons {market_context_for_state.get('consensus_total')} BestPlayable {market_context_for_state.get('best_book')} {market_context_for_state.get('best_available_total')} RecPlayable {market_context_for_state.get('price_adjusted_best_book')} {market_context_for_state.get('price_adjusted_best_total')} Vel {market_context_for_state.get('line_velocity')} MktConf {market_context_for_state.get('market_confirmation_score')} | "
                     f"Scenario {scenario} | "
                     f"CIP {current_pressure} RO {remaining_opp} Stress {stress} Dom {dominance} Contact {contact} "
                     f"Trend {contact_trend} Lineup {lineup_pressure} Bullpen {bullpen} Exit {starter_exit} TTO {tto} "
