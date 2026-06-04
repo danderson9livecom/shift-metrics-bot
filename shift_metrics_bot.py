@@ -56,6 +56,15 @@ Important:
 
 load_dotenv()
 
+# ---------------------------------------------------------------------------
+# SHIFT deployment identity / anti-confusion banner
+# ---------------------------------------------------------------------------
+APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.6.1")
+APP_MODE = "REPORTING + BETMGM PRACTICAL MODE"
+APP_BUILD_LABEL = f"SHIFT MLB {APP_VERSION} {APP_MODE}"
+DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-email-reporting-betmgm")
+RUN_EMAIL_TEST_ON_START = os.getenv("RUN_EMAIL_TEST_ON_START", "false").lower() == "true"
+
 TZ = ZoneInfo("America/Phoenix")
 STATE_FILE = os.getenv("STATE_FILE", "shift_v36_state.json")
 
@@ -2012,28 +2021,54 @@ def send_graded_result_text(msg):
 
 def maybe_send_daily_learning_report(state, any_live):
     """
-    Sends/prints one learning report per day after the configured hour once no games are live.
-    Default: 10 PM Arizona time. State resets daily with load_state().
+    Sends one end-of-night report per day after the configured hour once no games are live.
+
+    V3.6.1 fix:
+    - Nightly email is no longer hidden behind ENABLE_DAILY_LEARNING_REPORT.
+    - Logs a clear NIGHTLY EMAIL CHECK line so Railway confirms the code path.
+    - Uses separate state keys for SMS/log report and email report.
     """
-    if not ENABLE_DAILY_LEARNING_REPORT:
-        return
     if any_live:
         return
-    if now_local().hour < DAILY_LEARNING_REPORT_HOUR:
+    current_hour = now_local().hour
+    if current_hour < DAILY_LEARNING_REPORT_HOUR:
         return
 
-    sent_key = "daily_learning_report_sent_for"
-    if state.get(sent_key) == today():
-        return
+    report_date = today()
+    report = None
+    changed_state = False
 
-    report = generate_daily_learning_report(today())
-    print("DAILY LEARNING REPORT GENERATED")
-    send_admin_text(report)
-    email_sent = send_nightly_summary_email(today())
-    if email_sent:
-        state["nightly_email_report_sent_for"] = today()
-    state[sent_key] = today()
-    save_state(state)
+    print(
+        f"NIGHTLY EMAIL CHECK | date={report_date} | hour={current_hour} | "
+        f"enabled={ENABLE_NIGHTLY_EMAIL_REPORT} | to={NIGHTLY_EMAIL_TO or 'MISSING'}"
+    )
+
+    daily_sent_key = "daily_learning_report_sent_for"
+    if ENABLE_DAILY_LEARNING_REPORT and state.get(daily_sent_key) != report_date:
+        report = report or generate_daily_learning_report(report_date)
+        print(f"DAILY LEARNING REPORT GENERATED | {report_date}")
+        if SEND_DAILY_LEARNING_REPORT_SMS:
+            send_admin_text(report)
+        else:
+            print("DAILY LEARNING REPORT SMS SKIPPED: SEND_DAILY_LEARNING_REPORT_SMS=false")
+        state[daily_sent_key] = report_date
+        changed_state = True
+
+    email_sent_key = "nightly_email_report_sent_for"
+    if ENABLE_NIGHTLY_EMAIL_REPORT and state.get(email_sent_key) != report_date:
+        email_sent = send_nightly_summary_email(report_date)
+        if email_sent:
+            state[email_sent_key] = report_date
+            changed_state = True
+        else:
+            print(f"NIGHTLY EMAIL NOT MARKED SENT | {report_date}")
+    elif not ENABLE_NIGHTLY_EMAIL_REPORT:
+        print("NIGHTLY EMAIL SKIPPED: ENABLE_NIGHTLY_EMAIL_REPORT=false")
+    else:
+        print(f"NIGHTLY EMAIL SKIPPED: already sent for {report_date}")
+
+    if changed_state:
+        save_state(state)
 
 def historical_pattern_note(info, opportunity):
     """
@@ -6676,10 +6711,54 @@ def current_recommendations_snapshot(state):
     rows.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
     return rows
 
+
+def mask_secret(value, keep=3):
+    """Never print full secrets in Railway logs."""
+    value = str(value or "")
+    if not value:
+        return "MISSING"
+    if len(value) <= keep:
+        return "***"
+    return value[:keep] + "***"
+
+
+def print_startup_banner():
+    """Print one unmistakable startup banner so Railway logs prove the active code version."""
+    print("\n" + "=" * 72)
+    print(f"🚀 {APP_BUILD_LABEL}")
+    print(f"DEPLOY MARKER: {DEPLOY_MARKER}")
+    print(f"PYTHON FILE: {os.path.abspath(__file__)}")
+    print(f"WORKING DIR: {os.getcwd()}")
+    print(f"STATE FILE: {STATE_FILE}")
+    print("-" * 72)
+    print("EMAIL CONFIG:")
+    print(f"  ENABLE_NIGHTLY_EMAIL_REPORT={ENABLE_NIGHTLY_EMAIL_REPORT}")
+    print(f"  NIGHTLY_EMAIL_TO={NIGHTLY_EMAIL_TO or 'MISSING'}")
+    print(f"  EMAIL_FROM={EMAIL_FROM or 'MISSING'}")
+    print(f"  SMTP_HOST={SMTP_HOST or 'MISSING'}")
+    print(f"  SMTP_PORT={SMTP_PORT}")
+    print(f"  SMTP_USER={SMTP_USER or 'MISSING'}")
+    print(f"  SMTP_PASSWORD={mask_secret(SMTP_PASSWORD)}")
+    print(f"  SMTP_USE_TLS={SMTP_USE_TLS}")
+    print(f"  ATTACH_DAILY_CSVS_TO_EMAIL={ATTACH_DAILY_CSVS_TO_EMAIL}")
+    print(f"  DAILY_LEARNING_REPORT_HOUR={DAILY_LEARNING_REPORT_HOUR} AZ")
+    print("-" * 72)
+    print("BOOK CONFIG:")
+    print(f"  USER_PLAYABLE_BOOKS={USER_PLAYABLE_BOOKS}")
+    print(f"  MARKET_REFERENCE_BOOKS={MARKET_REFERENCE_BOOKS}")
+    print(f"  IGNORE_RECOMMENDATION_BOOKS={IGNORE_RECOMMENDATION_BOOKS}")
+    print(f"  REQUIRE_PLAYABLE_BOOK_FOR_STRIKE={REQUIRE_PLAYABLE_BOOK_FOR_STRIKE}")
+    print("=" * 72 + "\n")
+
 def main():
+    print_startup_banner()
     state = load_state()
     build_learning_summary()
     print("REAL-TIME DATA ADAPTER:", realtime_data_status())
+
+    if RUN_EMAIL_TEST_ON_START:
+        print("RUN_EMAIL_TEST_ON_START=true | sending one startup nightly email test now.")
+        send_nightly_summary_email(today())
 
     while True:
         any_live = False
@@ -6721,7 +6800,7 @@ def main():
             if not needs_odds:
                 print("ODDS SKIPPED: all games outside pregame window.")
 
-            print(f"\n--- SHIFT V3.5 CHECK {now_local().strftime('%I:%M:%S %p')} ---")
+            print(f"\n--- {APP_BUILD_LABEL} CHECK {now_local().strftime('%I:%M:%S %p')} ---")
 
             for g in games:
                 game_pk = str(g["gamePk"])
