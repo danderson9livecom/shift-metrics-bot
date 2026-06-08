@@ -59,10 +59,10 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # SHIFT deployment identity / anti-confusion banner
 # ---------------------------------------------------------------------------
-APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.7.6")
-APP_MODE = "NO CAPS + PROFILE MEASUREMENT + CALCULATED RISK"
+APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.7.7")
+APP_MODE = "NO CAPS + PROFILE MEASUREMENT + NEUTRAL WATCH ONLY"
 APP_BUILD_LABEL = f"SHIFT MLB {APP_VERSION} {APP_MODE}"
-DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-profile-promotion-dashboard-no-caps")
+DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-neutral-watch-only-profile-promotion")
 RUN_EMAIL_TEST_ON_START = os.getenv("RUN_EMAIL_TEST_ON_START", "false").lower() == "true"
 
 TZ = ZoneInfo("America/Phoenix")
@@ -121,6 +121,12 @@ PROFILE_PROMOTE_DISCOUNTED_MIN_SCORE = int(os.getenv("PROFILE_PROMOTE_DISCOUNTED
 PROFILE_PROMOTE_CONTINUATION_MIN_P2R = int(os.getenv("PROFILE_PROMOTE_CONTINUATION_MIN_P2R", "75"))
 PROFILE_PROMOTE_CONTINUATION_MIN_CONV = int(os.getenv("PROFILE_PROMOTE_CONTINUATION_MIN_CONV", "62"))
 PROFILE_PROMOTE_MAX_LINE_AGE = int(os.getenv("PROFILE_PROMOTE_MAX_LINE_AGE", "120"))
+
+# V3.7.7 neutral-market discipline:
+# June 5-7 reports showed NEUTRAL_MARKET was the major leak.
+# Keep it classified and reported, but do not allow it to become a BET NOW SMS.
+ENABLE_NEUTRAL_MARKET_WATCH_ONLY = os.getenv("ENABLE_NEUTRAL_MARKET_WATCH_ONLY", "true").lower() == "true"
+NEUTRAL_MARKET_WATCH_REASON = "NEUTRAL_MARKET demoted to research/log-only; no market overreaction or underreaction edge"
 
 # User-entry tracking placeholders. These do not change betting logic; they make
 # it possible to compare bot line vs. actual user entry when the user beats the number.
@@ -930,7 +936,7 @@ def market_reaction_scenario_label(profile):
         "PITCHING_DOMINANCE_UNDER": "Pitching Dominance → Early UNDER",
         "INFLATED_NO_BET": "Inflated Market → No Bet Unless Clear",
         "DISCOUNTED_NO_BET": "Discounted Market → No Bet Unless Pressure Confirms",
-        "NEUTRAL_MARKET": "Neutral Market",
+        "NEUTRAL_MARKET": "Neutral Market → Watch/Research Only",
     }
     return labels.get(profile, "Market Reaction Evaluation")
 
@@ -1514,6 +1520,9 @@ def recommended_app_status(opportunity, market_context):
     """Short practical status for real live betting apps."""
     if not opportunity:
         return "NO BET — no qualifying play"
+    profile = market_reaction_profile_from_scores((opportunity or {}).get("scores", {}), (opportunity or {}).get("scenario"))
+    if ENABLE_NEUTRAL_MARKET_WATCH_ONLY and profile == "NEUTRAL_MARKET":
+        return "WATCH ONLY — NEUTRAL_MARKET research bucket, no SMS bet"
     price = opportunity.get("price")
     side = str(opportunity.get("side", "")).upper()
     line = opportunity.get("line")
@@ -2514,6 +2523,8 @@ def profile_dashboard_lines(report_date=None):
 
     lines = []
     lines.append("Profile Dashboard:")
+    if ENABLE_NEUTRAL_MARKET_WATCH_ONLY:
+        lines.append("• NEUTRAL_MARKET: WATCH ONLY / research bucket — no BET NOW SMS promotion.")
     if not all_rows:
         lines.append("• Building sample — no profile results stored yet.")
         return lines
@@ -3890,6 +3901,15 @@ def v26_final_betnow_gate(state_game, info, market_context, opportunity):
 
     snap = v26_signal_snapshot(info, opportunity)
     profile = market_reaction_profile_from_scores((opportunity or {}).get("scores", {}), (opportunity or {}).get("scenario"))
+
+    # V3.7.7: NEUTRAL_MARKET is not deleted; it remains a research bucket.
+    # It is no longer allowed to become a BET NOW text because recent results
+    # showed it losing materially compared with true reaction profiles.
+    if ENABLE_NEUTRAL_MARKET_WATCH_ONLY and profile == "NEUTRAL_MARKET":
+        opportunity["neutral_market_watch_only"] = True
+        opportunity["neutral_market_watch_reason"] = NEUTRAL_MARKET_WATCH_REASON
+        return False, NEUTRAL_MARKET_WATCH_REASON
+
     profile_min_conf = profile_promotion_min_confidence(profile)
     if snap["confidence"] < profile_min_conf:
         return False, f"confidence {snap['confidence']} below profile minimum {profile_min_conf} for {profile}"
