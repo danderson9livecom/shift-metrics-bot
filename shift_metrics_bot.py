@@ -13,45 +13,40 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V3.6 REPORTING + BETMGM PRACTICAL MODE
+SHIFT MLB V3.10.0
+ROLLING DASHBOARDS + FEATURE LEARNING
 
-Professional live MLB totals monitor.
-V3.6 keeps the V3.5 real-time data adapter and adds nightly email reporting, BetMGM-first recommendations, market discount tracking, and cleaner audit logging.
-It uses MLB Stats API for live game context, probable pitchers, current batter, batting-order pocket, pitch/play-by-play context, and The Odds API for bookmaker totals. Premium providers can be added later through environment switches without rewriting the betting engine.
-V2.2.1 adds:
-    - Dedicated Pre-Run OVER WATCH engine
-    - Pressure-to-runs conversion confirmation
-    - Market-lag detection before line movement
-    - Better entry guidance for OVERs without forcing bad STRIKES
-    - Predictive Market Move Engine
-    - Run Conversion Score for OVER alerts
-    - Run Prevention Score for UNDER alerts
-    - Better Entry Guidance
-    - Stronger WATCH vs STRIKE separation
-    - WATCH vs STRIKE separation
-    - Real UNDER engine
-    - Fake-pressure filter
-    - Market resistance / overreaction scoring
-    - Contact trend scoring
-    - Times-through-order pressure
-    - Starter exit probability
-    - Duplicate alert control
+Current Production Version
 
-Core idea:
-    Current Score + Expected Future Runs = Projected Final Total
+This codebase is cumulative. It includes the earlier V3.5, V3.6,
+V3.7, V3.8, and V3.9 engines, plus the V3.10 evaluation layer.
+Seeing older version labels inside feature-specific comments is normal;
+those sections remain active parts of the current model.
 
-V2 focuses on:
-    - Small market inefficiencies
-    - Explainable alerts
-    - No daily cap
-    - Full game totals first
-    - Team totals and remaining totals when odds provider returns them
-    - 1st through 9th inning monitoring
-    - Scenario-based interpretation
+Major V3.10 Business-Process Additions:
+- Google Sheets long-term memory through TRACKING_WEBHOOK_URL
+- Master decision database for BET_NOW, TEST_UNIT, RESEARCH_ONLY, and NO_BET
+- Adaptive profile learning through adaptive_config.json
+- Feature learning summaries
+- Rolling 7-day / 30-day / season evaluation dashboards
+- Better CLV snapshot tracking
+- Capped adaptive confidence adjustments
+- Daily learning reports with stronger evaluation sections
+
+Core Purpose:
+SHIFT is not just an alert bot. It is a season-long research platform.
+It tracks every meaningful model decision, grades outcomes, measures CLV,
+identifies which profiles are profitable, and gradually improves confidence
+through sample-based learning.
+
+Operational Goal:
+Game -> Decision -> Google Sheets Database -> Grading -> Learning -> Dashboard -> Better Decisions
 
 Important:
-    This bot can only evaluate odds markets your odds provider actually returns.
-    Some Odds API plans do not provide true in-play/live totals, team totals, or remaining-game totals.
+The bot can only evaluate odds markets returned by the configured odds provider.
+Some Odds API plans do not provide true in-play/live totals, team totals, or
+remaining-game totals. Premium providers can be added later through environment
+switches without rewriting the betting engine.
 """
 
 load_dotenv()
@@ -59,10 +54,10 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # SHIFT deployment identity / anti-confusion banner
 # ---------------------------------------------------------------------------
-APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.8.0")
-APP_MODE = "UNDER TEST ALERTS + DISCOUNTED OVER PROTECTION"
+APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.10.0")
+APP_MODE = "ROLLING DASHBOARDS + FEATURE LEARNING"
 APP_BUILD_LABEL = f"SHIFT MLB {APP_VERSION} {APP_MODE}"
-DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-under-test-alerts-discounted-over-protection")
+DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-rolling-dashboards-feature-learning")
 RUN_EMAIL_TEST_ON_START = os.getenv("RUN_EMAIL_TEST_ON_START", "false").lower() == "true"
 
 TZ = ZoneInfo("America/Phoenix")
@@ -75,6 +70,29 @@ LEARNING_SUMMARY_FILE = os.getenv("LEARNING_SUMMARY_FILE", "learning_summary.csv
 PROFILE_NEAR_MISS_FILE = os.getenv("PROFILE_NEAR_MISS_FILE", "profile_near_misses.csv")
 PROFILE_RESEARCH_FILE = os.getenv("PROFILE_RESEARCH_FILE", "profile_research_candidates.csv")
 PROFILE_LEARNING_SUMMARY_FILE = os.getenv("PROFILE_LEARNING_SUMMARY_FILE", "profile_learning_summary.csv")
+
+# V3.9.0 decision database + adaptive learning engine.
+# This logs EVERY meaningful model decision, not only sent BET NOW alerts.
+# It is the bridge from daily reporting into long-term evaluation and controlled self-optimization.
+DECISION_LOG_FILE = os.getenv("DECISION_LOG_FILE", "shift_decision_log.csv")
+ADAPTIVE_CONFIG_FILE = os.getenv("ADAPTIVE_CONFIG_FILE", "adaptive_config.json")
+ENABLE_DECISION_LOG = os.getenv("ENABLE_DECISION_LOG", "true").lower() == "true"
+ENABLE_DECISION_LOG_NO_BETS = os.getenv("ENABLE_DECISION_LOG_NO_BETS", "true").lower() == "true"
+ENABLE_DECISION_LOG_RESEARCH = os.getenv("ENABLE_DECISION_LOG_RESEARCH", "true").lower() == "true"
+ENABLE_ADAPTIVE_CONFIG = os.getenv("ENABLE_ADAPTIVE_CONFIG", "true").lower() == "true"
+ENABLE_ADAPTIVE_CONFIDENCE = os.getenv("ENABLE_ADAPTIVE_CONFIDENCE", "true").lower() == "true"
+ENABLE_ADAPTIVE_REPORTING = os.getenv("ENABLE_ADAPTIVE_REPORTING", "true").lower() == "true"
+MIN_ADAPTIVE_SAMPLE = int(os.getenv("MIN_ADAPTIVE_SAMPLE", "75"))
+ADAPTIVE_STRONG_ROI = float(os.getenv("ADAPTIVE_STRONG_ROI", "0.04"))
+ADAPTIVE_WEAK_ROI = float(os.getenv("ADAPTIVE_WEAK_ROI", "-0.03"))
+ADAPTIVE_STRONG_CLV = float(os.getenv("ADAPTIVE_STRONG_CLV", "0.25"))
+ADAPTIVE_WEAK_CLV = float(os.getenv("ADAPTIVE_WEAK_CLV", "-0.25"))
+ADAPTIVE_PROVEN_CONF_BONUS = int(os.getenv("ADAPTIVE_PROVEN_CONF_BONUS", "4"))
+ADAPTIVE_TIGHTEN_CONF_PENALTY = int(os.getenv("ADAPTIVE_TIGHTEN_CONF_PENALTY", "6"))
+ADAPTIVE_FAILING_CONF_PENALTY = int(os.getenv("ADAPTIVE_FAILING_CONF_PENALTY", "10"))
+DECISION_LOG_REJECT_COOLDOWN_SECONDS = int(os.getenv("DECISION_LOG_REJECT_COOLDOWN_SECONDS", "900"))
+DECISION_LOG_ACCEPT_COOLDOWN_SECONDS = int(os.getenv("DECISION_LOG_ACCEPT_COOLDOWN_SECONDS", "300"))
+
 ENABLE_SELF_LEARNING = os.getenv("ENABLE_SELF_LEARNING", "true").lower() == "true"
 
 # V3.7.3 profile learning / calculated-risk controls.
@@ -1890,6 +1908,404 @@ def csv_write_rows(path, fieldnames, rows):
         print(f"CSV WRITE ERROR {path}:", repr(e))
 
 
+
+# ---------------------------------------------------------------------------
+# V3.9.0 Decision Database + Adaptive Learning
+# ---------------------------------------------------------------------------
+
+def decision_log_fieldnames():
+    return [
+        "decision_id", "timestamp", "date", "game_key", "game_pk", "game",
+        "action", "decision_type", "reject_reason",
+        "profile", "scenario", "side", "line", "price", "book",
+        "opening_total", "first_seen_total", "true_opening_total", "live_total",
+        "projected_total", "edge", "confidence", "expected_value",
+        "inning", "inning_state", "outs", "score", "base_out",
+        "projection_score", "confirmation_score", "market_confirmation_score",
+        "market_value_score", "risk_filter_score", "calculated_risk_tier", "suggested_unit",
+        "pressure_to_runs", "run_conversion", "traffic_conversion", "pitcher_stress",
+        "contact_quality", "bullpen_risk", "run_prevention", "strikeout_environment",
+        "bullpen_lockdown", "settle_down_score", "continuation_score",
+        "discounted_over_score", "false_inflation_score", "continuation_exhaustion_score",
+        "pitching_dominance_under_score", "market_reaction_move", "market_discount",
+        "consensus_total", "market_min_total", "market_max_total", "market_disagreement",
+        "line_velocity", "line_direction", "book_count", "recommended_book",
+        "recommended_total", "recommended_price", "best_line_age_seconds",
+        "adaptive_status", "adaptive_confidence_adjustment", "adaptive_sample",
+        "adaptive_roi", "adaptive_avg_clv",
+        "pattern_tags", "bet_quality", "quality_reason",
+        "final_score", "final_total", "result", "units", "clv", "graded_at",
+    ]
+
+
+def decision_game_label(info):
+    return f"{info.get('away', '')} at {info.get('home', '')}".strip(" at")
+
+
+def decision_action_from_opportunity(opportunity, approved=False, reason=""):
+    if not opportunity:
+        return "NO_OPPORTUNITY"
+    if approved:
+        tier = str(opportunity.get("calculated_risk_tier") or "").upper()
+        unit = str(opportunity.get("suggested_unit") or "").upper()
+        if tier == "C" or "TEST" in unit:
+            return "TEST_UNIT"
+        return "BET_NOW"
+    action = str(opportunity.get("action") or "").upper()
+    reason_u = str(reason or "").upper()
+    if action == "STRIKE":
+        return "NO_BET"
+    if "WATCH" in action or "RESEARCH" in action or "WATCH" in reason_u or "RESEARCH" in reason_u:
+        return "RESEARCH_ONLY"
+    return "NO_BET"
+
+
+def decision_log_id(info, opportunity, action, reason=""):
+    """
+    Stable enough to prevent duplicate poll spam, but specific enough to capture
+    materially different decisions as game state changes.
+    """
+    info = info or {}
+    opportunity = opportunity or {}
+    scores = opportunity.get("scores", {}) or {}
+    profile = market_reaction_profile_from_scores(scores, opportunity.get("scenario"))
+    side = str(opportunity.get("side") or "NONE").upper()
+    line = str(opportunity.get("line") or "")
+    inning = safe_int(info.get("inning"), 0)
+    outs = safe_int(info.get("outs"), 0)
+    reason_key = str(reason or "").lower()[:60]
+    return "|".join([
+        today(), str(info.get("game_pk") or decision_game_label(info)), action,
+        profile, side, line, str(inning), str(outs), reason_key,
+    ])
+
+
+def should_log_decision(state_game, decision_id, action):
+    if not decision_id:
+        return False
+    state_game = state_game if isinstance(state_game, dict) else {}
+    cache = state_game.setdefault("decision_log_cache", {})
+    last = safe_float(cache.get(decision_id), 0)
+    now_ts = time.time()
+    cooldown = DECISION_LOG_ACCEPT_COOLDOWN_SECONDS if action in ["BET_NOW", "TEST_UNIT"] else DECISION_LOG_REJECT_COOLDOWN_SECONDS
+    if last and (now_ts - last) < cooldown:
+        return False
+    cache[decision_id] = now_ts
+    return True
+
+
+def decision_row_from_opportunity(info, market_context, opportunity, action, decision_type="", reject_reason=""):
+    info = info or {}
+    market_context = market_context or {}
+    opportunity = opportunity or {}
+    scores = opportunity.get("scores", {}) or {}
+    profile = market_reaction_profile_from_scores(scores, opportunity.get("scenario"))
+    tier = opportunity.get("calculated_risk_tier") or calculated_risk_tier(opportunity, market_context) if opportunity else ""
+    row = {
+        "decision_id": decision_log_id(info, opportunity, action, reject_reason),
+        "timestamp": now_local().isoformat(),
+        "date": today(),
+        "game_key": game_key_from_info(info) if info else "",
+        "game_pk": info.get("game_pk", ""),
+        "game": decision_game_label(info),
+        "action": action,
+        "decision_type": decision_type,
+        "reject_reason": reject_reason,
+        "profile": profile,
+        "scenario": opportunity.get("scenario", ""),
+        "side": opportunity.get("side", ""),
+        "line": opportunity.get("line", opportunity.get("recommended_total", "")),
+        "price": opportunity.get("price", opportunity.get("recommended_price", "")),
+        "book": opportunity.get("recommended_book") or market_context.get("recommended_book") or market_context.get("primary_book") or "",
+        "opening_total": market_context.get("opening_total"),
+        "first_seen_total": market_context.get("first_seen_total"),
+        "true_opening_total": market_context.get("true_opening_total"),
+        "live_total": market_context.get("live_total", opportunity.get("line", "")),
+        "projected_total": opportunity.get("projection", opportunity.get("projected_total", "")),
+        "edge": opportunity.get("edge", ""),
+        "confidence": opportunity.get("confidence", ""),
+        "expected_value": opportunity.get("expected_value", ""),
+        "inning": info.get("inning", ""),
+        "inning_state": info.get("inning_state", ""),
+        "outs": info.get("outs", ""),
+        "score": score_text(info) if info else "",
+        "base_out": f"{(info.get('base_state') or {}).get('label', '')}, {info.get('outs', '')} out(s)",
+        "projection_score": scores.get("projection_score"),
+        "confirmation_score": scores.get("confirmation_score"),
+        "market_confirmation_score": market_context.get("market_confirmation_score", opportunity.get("market_confirmation_score")),
+        "market_value_score": master_market_value_score(opportunity, scores) if opportunity else "",
+        "risk_filter_score": master_risk_filter_score(opportunity, info, scores) if opportunity else "",
+        "calculated_risk_tier": tier,
+        "suggested_unit": tier_unit_guidance(tier) if tier else "",
+        "pressure_to_runs": scores.get("pressure_to_runs"),
+        "run_conversion": scores.get("run_conversion"),
+        "traffic_conversion": scores.get("traffic_conversion"),
+        "pitcher_stress": scores.get("pitcher_stress"),
+        "contact_quality": scores.get("contact_quality"),
+        "bullpen_risk": scores.get("bullpen_risk"),
+        "run_prevention": scores.get("run_prevention"),
+        "strikeout_environment": scores.get("strikeout_environment"),
+        "bullpen_lockdown": scores.get("bullpen_lockdown"),
+        "settle_down_score": scores.get("settle_down_score"),
+        "continuation_score": scores.get("continuation_score"),
+        "discounted_over_score": scores.get("discounted_over_score"),
+        "false_inflation_score": scores.get("false_inflation_score"),
+        "continuation_exhaustion_score": scores.get("continuation_exhaustion_score"),
+        "pitching_dominance_under_score": scores.get("pitching_dominance_under_score"),
+        "market_reaction_move": scores.get("market_reaction_move"),
+        "market_discount": market_context.get("market_discount"),
+        "consensus_total": market_context.get("consensus_total"),
+        "market_min_total": market_context.get("market_min_total"),
+        "market_max_total": market_context.get("market_max_total"),
+        "market_disagreement": market_context.get("market_disagreement"),
+        "line_velocity": market_context.get("line_velocity"),
+        "line_direction": market_context.get("line_direction"),
+        "book_count": market_context.get("book_count"),
+        "recommended_book": opportunity.get("recommended_book") or market_context.get("recommended_book"),
+        "recommended_total": opportunity.get("recommended_total") or opportunity.get("line"),
+        "recommended_price": opportunity.get("recommended_price") or opportunity.get("price"),
+        "best_line_age_seconds": market_context.get("best_line_age_seconds"),
+        "adaptive_status": opportunity.get("adaptive_status"),
+        "adaptive_confidence_adjustment": opportunity.get("adaptive_confidence_adjustment"),
+        "adaptive_sample": opportunity.get("adaptive_sample"),
+        "adaptive_roi": opportunity.get("adaptive_roi"),
+        "adaptive_avg_clv": opportunity.get("adaptive_avg_clv"),
+        "bet_quality": opportunity.get("bet_quality"),
+        "quality_reason": opportunity.get("quality_reason"),
+        "final_score": "",
+        "final_total": "",
+        "result": "PENDING",
+        "units": "",
+        "clv": "",
+        "graded_at": "",
+    }
+    row["pattern_tags"] = "|".join(pattern_tags_from_row({
+        **row,
+        "p2r": row.get("pressure_to_runs"),
+        "conv": row.get("run_conversion"),
+        "stress": row.get("pitcher_stress"),
+        "contact": row.get("contact_quality"),
+        "pred_move": scores.get("predictive_market_move"),
+        "threat_index": scores.get("threat_index"),
+    }))
+    if not row.get("bet_quality"):
+        bq, qr = classify_bet_quality(row)
+        row["bet_quality"] = bq
+        row["quality_reason"] = qr
+    return row
+
+
+def log_shift_decision(state_game, info, market_context, opportunity, action=None, decision_type="", reject_reason=""):
+    """
+    Master decision logger: BET_NOW, TEST_UNIT, NO_BET, RESEARCH_ONLY.
+    This is the data backbone for daily collection, long-term evaluation,
+    adaptive confidence, and self-optimization.
+    """
+    if not ENABLE_DECISION_LOG or not opportunity:
+        return
+    action = action or decision_action_from_opportunity(opportunity, approved=False, reason=reject_reason)
+    if action == "NO_BET" and not ENABLE_DECISION_LOG_NO_BETS:
+        return
+    if action == "RESEARCH_ONLY" and not ENABLE_DECISION_LOG_RESEARCH:
+        return
+    row = decision_row_from_opportunity(info, market_context, opportunity, action, decision_type, reject_reason)
+    if not should_log_decision(state_game if isinstance(state_game, dict) else {}, row.get("decision_id"), action):
+        return
+    csv_append_once(DECISION_LOG_FILE, decision_log_fieldnames(), row)
+    post_tracking_event("shift_decision", row)
+    print(f"DECISION LOG | {action} | {row.get('game')} | {row.get('side')} {row.get('line')} | {row.get('profile')} | {reject_reason or decision_type}")
+
+
+def load_adaptive_config():
+    if not ENABLE_ADAPTIVE_CONFIG:
+        return {}
+    if not os.path.exists(ADAPTIVE_CONFIG_FILE):
+        return {}
+    try:
+        with open(ADAPTIVE_CONFIG_FILE, "r") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print("ADAPTIVE CONFIG LOAD ERROR:", repr(e))
+        return {}
+
+
+def save_adaptive_config(config):
+    if not ENABLE_ADAPTIVE_CONFIG:
+        return False
+    try:
+        with open(ADAPTIVE_CONFIG_FILE, "w") as f:
+            json.dump(config, f, indent=2)
+        return True
+    except Exception as e:
+        print("ADAPTIVE CONFIG SAVE ERROR:", repr(e))
+        return False
+
+
+def adaptive_rows_for_learning():
+    rows = csv_read_rows(DECISION_LOG_FILE)
+    return [
+        r for r in rows
+        if r.get("result") in ["WIN", "LOSS", "PUSH"]
+        and r.get("action") in ["BET_NOW", "TEST_UNIT"]
+    ]
+
+
+def build_adaptive_config_from_results():
+    rows = adaptive_rows_for_learning()
+    profiles = {}
+    for r in rows:
+        profile = r.get("profile") or r.get("market_reaction_profile") or "UNCLASSIFIED"
+        profiles.setdefault(profile, []).append(r)
+
+    config = {}
+    for profile, bucket in sorted(profiles.items()):
+        w, l, p, pct, units = summarize_record(bucket)
+        graded_count = max(1, w + l)
+        roi = round(units / graded_count, 4)
+        clvs = [safe_float(x.get("clv"), 0) for x in bucket if str(x.get("clv", "")).strip() not in ["", "None"]]
+        avg_clv = round(avg(clvs), 2) if clvs else 0.0
+        sample = w + l + p
+
+        if sample < MIN_ADAPTIVE_SAMPLE:
+            status = "OPEN_TEST"
+            conf_adj = 0
+            tier_bias = "none"
+        elif roi >= ADAPTIVE_STRONG_ROI and avg_clv >= ADAPTIVE_STRONG_CLV:
+            status = "PROVEN"
+            conf_adj = ADAPTIVE_PROVEN_CONF_BONUS
+            tier_bias = "upgrade"
+        elif roi <= (ADAPTIVE_WEAK_ROI * 2) or avg_clv <= (ADAPTIVE_WEAK_CLV * 2):
+            status = "FAILING"
+            conf_adj = -ADAPTIVE_FAILING_CONF_PENALTY
+            tier_bias = "downgrade_hard"
+        elif roi <= ADAPTIVE_WEAK_ROI or avg_clv <= ADAPTIVE_WEAK_CLV:
+            status = "TIGHTEN"
+            conf_adj = -ADAPTIVE_TIGHTEN_CONF_PENALTY
+            tier_bias = "downgrade"
+        else:
+            status = "HOLD"
+            conf_adj = 0
+            tier_bias = "none"
+
+        config[profile] = {
+            "sample": sample, "wins": w, "losses": l, "pushes": p,
+            "win_pct": pct, "units": units, "roi": roi, "avg_clv": avg_clv,
+            "status": status, "confidence_adjustment": conf_adj,
+            "tier_bias": tier_bias, "updated_at": now_local().isoformat(),
+        }
+    save_adaptive_config(config)
+    return config
+
+
+def apply_adaptive_adjustment(opportunity):
+    """
+    Controlled self-optimization: the model can only make small confidence
+    adjustments after profile samples prove themselves in the decision database.
+    """
+    if not ENABLE_ADAPTIVE_CONFIDENCE or not opportunity:
+        return opportunity
+    scores = opportunity.get("scores", {}) or {}
+    profile = market_reaction_profile_from_scores(scores, opportunity.get("scenario"))
+    config = load_adaptive_config()
+    profile_cfg = config.get(profile) or {}
+    if not profile_cfg:
+        return opportunity
+
+    adj = safe_int(profile_cfg.get("confidence_adjustment"), 0)
+    opportunity = dict(opportunity)
+    opportunity["confidence"] = round(clamp(safe_int(opportunity.get("confidence"), 0) + adj))
+    opportunity["adaptive_status"] = profile_cfg.get("status", "")
+    opportunity["adaptive_confidence_adjustment"] = adj
+    opportunity["adaptive_sample"] = profile_cfg.get("sample", 0)
+    opportunity["adaptive_roi"] = profile_cfg.get("roi", "")
+    opportunity["adaptive_avg_clv"] = profile_cfg.get("avg_clv", "")
+    return opportunity
+
+
+def grade_completed_decision_log(game_pk, label, final_score):
+    if not ENABLE_DECISION_LOG:
+        return
+    final_total = final_total_from_score(final_score)
+    if final_total is None:
+        return
+    rows = csv_read_rows(DECISION_LOG_FILE)
+    if not rows:
+        return
+
+    changed = False
+    for row in rows:
+        same_game = (
+            row.get("date") == today()
+            and (
+                row.get("game_pk") == str(game_pk)
+                or row.get("game") == label
+                or row.get("game_key") == f"{today()}::{label}"
+            )
+        )
+        if not same_game:
+            continue
+        if row.get("result") in ["WIN", "LOSS", "PUSH"]:
+            continue
+        side = str(row.get("side", "")).upper()
+        line = safe_float(row.get("line"), None)
+        if side not in ["OVER", "UNDER"] or line is None:
+            continue
+        result = grade_bet(side, line, final_total)
+        row["final_score"] = final_score
+        row["final_total"] = final_total
+        row["result"] = result
+        row["units"] = american_odds_profit_units(row.get("price"), result)
+        close_line = safe_float(row.get("live_total"), None)
+        # If no later close snapshot is available, leave CLV blank. Poll snapshots can enrich this later.
+        if row.get("clv") in [None, ""]:
+            row["clv"] = ""
+        row["graded_at"] = now_local().isoformat()
+        changed = True
+    if changed:
+        csv_write_rows(DECISION_LOG_FILE, decision_log_fieldnames(), rows)
+        build_adaptive_config_from_results()
+        print(f"DECISION LOG GRADED | {label} | Final {final_score} | adaptive config refreshed")
+
+
+def decision_report_lines(report_date=None):
+    report_date = report_date or today()
+    rows = [r for r in csv_read_rows(DECISION_LOG_FILE) if r.get("date") == report_date]
+    if not rows:
+        return ["Decision Database: no rows logged yet."]
+    lines = ["Decision Database:"]
+    for action in ["BET_NOW", "TEST_UNIT", "RESEARCH_ONLY", "NO_BET"]:
+        bucket = [r for r in rows if r.get("action") == action and r.get("result") in ["WIN", "LOSS", "PUSH"]]
+        pending = [r for r in rows if r.get("action") == action and r.get("result") not in ["WIN", "LOSS", "PUSH"]]
+        if bucket:
+            w, l, p, pct, units = summarize_record(bucket)
+            lines.append(f"• {action}: {w}-{l}-{p} | {pct}% | {units:+.2f}u | pending {len(pending)}")
+        elif pending:
+            lines.append(f"• {action}: {len(pending)} pending")
+    # Show pass value only for graded NO_BET rows: negative units here means avoiding those bets saved money.
+    passed = [r for r in rows if r.get("action") == "NO_BET" and r.get("result") in ["WIN", "LOSS", "PUSH"]]
+    if passed:
+        w, l, p, pct, units = summarize_record(passed)
+        lines.append(f"• Passed-play audit: would-have been {w}-{l}-{p} | {units:+.2f}u")
+    return lines
+
+
+def adaptive_report_lines():
+    if not ENABLE_ADAPTIVE_REPORTING:
+        return []
+    config = build_adaptive_config_from_results()
+    lines = ["Adaptive Profile Config:"]
+    if not config:
+        lines.append(f"• Building samples. Need {MIN_ADAPTIVE_SAMPLE}+ graded BET_NOW/TEST_UNIT decisions per profile.")
+        return lines
+    for profile, cfg in sorted(config.items(), key=lambda kv: safe_int(kv[1].get("sample"), 0), reverse=True):
+        lines.append(
+            f"• {profile}: {cfg.get('status')} | Sample {cfg.get('sample')} | "
+            f"ROI {safe_float(cfg.get('roi'), 0):+.2%} | CLV {safe_float(cfg.get('avg_clv'), 0):+.2f} | "
+            f"ConfAdj {cfg.get('confidence_adjustment')}"
+        )
+    return lines
+
 def game_key_from_info(info):
     return f"{today()}::{info.get('away')} at {info.get('home')}"
 
@@ -3180,6 +3596,14 @@ def generate_daily_learning_report(report_date=None):
             lines.append("• " + summarize_bucket(tag, rows))
 
     lines.append("")
+    for dl in decision_report_lines(report_date):
+        lines.append(dl)
+
+    lines.append("")
+    for al in adaptive_report_lines():
+        lines.append(al)
+
+    lines.append("")
     lines.append("Sample Discipline:")
     lines.append(f"• Strong-pattern label requires {MIN_STRONG_PATTERN_SAMPLE}+ graded decisions.")
     lines.append(f"• Automatic threshold changes should wait for {MIN_AUTO_ADJUST_SAMPLE}+ independent decisions.")
@@ -3645,6 +4069,10 @@ def grade_completed_strikes(game_pk, label, final_score):
     # V3.7.9: grade research candidates even when no SMS strike was sent.
     grade_profile_research_candidates(game_pk, label, final_score)
 
+    # V3.9.0: grade the master decision database too. This includes BET_NOW,
+    # TEST_UNIT, RESEARCH_ONLY, and NO_BET audits.
+    grade_completed_decision_log(game_pk, label, final_score)
+
     rows = csv_read_rows(STRIKE_HISTORY_FILE)
     if not rows:
         return
@@ -3976,6 +4404,9 @@ def apply_professional_decision_layer(state_game, info, market_context, opportun
     """
     V2.6 professional decision layer.
     The scoring engine can produce candidates, but only this layer can approve BET NOW SMS.
+
+    V3.9.0 adds the business-process loop:
+    candidate -> adaptive confidence -> final decision -> master decision log.
     """
     if not opportunity:
         update_current_recommendation(state_game, info, market_context, None, "NO PLAY", "no qualifying opportunity")
@@ -3983,26 +4414,36 @@ def apply_professional_decision_layer(state_game, info, market_context, opportun
 
     if opportunity.get("action") != "STRIKE":
         update_current_recommendation(state_game, info, market_context, opportunity, "HOLD", "watch-level only; SMS disabled")
+        log_shift_decision(state_game, info, market_context, opportunity, "RESEARCH_ONLY", "watch_or_research", "watch-level only; SMS disabled")
         return None, "watch only"
 
     # V3.2: before the final gate, rewrite the candidate to the best practical app line.
     opportunity = apply_price_adjusted_best_line(info, market_context, opportunity)
+
+    # V3.9.0: apply only sample-disciplined adaptive confidence adjustments.
+    opportunity = apply_adaptive_adjustment(opportunity)
+
     market_context["recommended_book"] = opportunity.get("recommended_book") or market_context.get("recommended_book")
     market_context["recommended_total"] = opportunity.get("recommended_total") or opportunity.get("line")
     market_context["recommended_price"] = opportunity.get("recommended_price") or opportunity.get("price")
     market_context["app_status"] = opportunity.get("app_status") or recommended_app_status(opportunity, market_context)
     if opportunity.get("action") == "NO_PLAY":
-        update_current_recommendation(state_game, info, market_context, opportunity, "NO BET", opportunity.get("app_status", "best-line rewrite blocked"))
-        return None, opportunity.get("app_status", "best-line rewrite blocked")
+        reason = opportunity.get("app_status", "best-line rewrite blocked")
+        update_current_recommendation(state_game, info, market_context, opportunity, "NO BET", reason)
+        log_shift_decision(state_game, info, market_context, opportunity, "NO_BET", "rejected", reason)
+        return None, reason
 
     approved, reason = v26_final_betnow_gate(state_game, info, market_context, opportunity)
     if not approved:
         update_current_recommendation(state_game, info, market_context, opportunity, "HOLD", reason)
+        log_shift_decision(state_game, info, market_context, opportunity, "NO_BET", "rejected", reason)
         print(f"V2.6 BLOCK | {info.get('away')} at {info.get('home')} | {reason}")
         return None, reason
 
     status = "BET NOW - REVERSAL" if opportunity.get("reversal") else "BET NOW"
     update_current_recommendation(state_game, info, market_context, opportunity, status, reason)
+    action = decision_action_from_opportunity(opportunity, approved=True, reason=reason)
+    log_shift_decision(state_game, info, market_context, opportunity, action, "accepted", reason)
     return opportunity, reason
 
 
@@ -4221,6 +4662,9 @@ def update_active_clv_snapshots(info, live_total):
     if current_line is None:
         return
 
+    # V3.9.0: keep master decision log CLV fresh using the same already-fetched live total.
+    update_decision_log_clv_snapshots(info, live_total)
+
     rows = csv_read_rows(STRIKE_HISTORY_FILE)
     if not rows:
         return
@@ -4277,6 +4721,47 @@ def update_active_clv_snapshots(info, live_total):
         # Preserve unknown internal key by writing only known strike fields would drop it,
         # so intentionally do not rewrite strike_history here. CLV snapshots are enough.
         pass
+
+
+
+def update_decision_log_clv_snapshots(info, live_total):
+    """
+    Mirrors CLV poll snapshots into the master decision database so the adaptive
+    engine can use closing-line direction, not only win/loss. Uses already-fetched odds.
+    """
+    if not ENABLE_DECISION_LOG or not ENABLE_CLV_TRACKING:
+        return
+    current_line = safe_float(live_total, None)
+    if current_line is None:
+        return
+    rows = csv_read_rows(DECISION_LOG_FILE)
+    if not rows:
+        return
+    changed = False
+    for row in rows:
+        if row.get("date") != today():
+            continue
+        if row.get("action") not in ["BET_NOW", "TEST_UNIT", "RESEARCH_ONLY", "NO_BET"]:
+            continue
+        if row.get("result") in ["WIN", "LOSS", "PUSH"]:
+            continue
+        if not (row.get("game_pk") == str(info.get("game_pk")) or row.get("game") == f"{info.get('away')} at {info.get('home')}"):
+            continue
+        side = str(row.get("side", "")).upper()
+        alert_line = safe_float(row.get("line"), None)
+        if side not in ["OVER", "UNDER"] or alert_line is None:
+            continue
+        if side == "OVER":
+            clv = round(current_line - alert_line, 1)
+        else:
+            clv = round(alert_line - current_line, 1)
+        old_clv = safe_float(row.get("clv"), None)
+        if old_clv is not None and abs(clv - old_clv) < CLV_SNAPSHOT_MIN_MOVE:
+            continue
+        row["clv"] = clv
+        changed = True
+    if changed:
+        csv_write_rows(DECISION_LOG_FILE, decision_log_fieldnames(), rows)
 
 
 def load_state():
@@ -8876,6 +9361,532 @@ def main():
         sleep_seconds = determine_next_sleep(any_live, any_near_strike)
         print(f"Sleeping {sleep_seconds} seconds...\n")
         time.sleep(sleep_seconds)
+
+
+# ---------------------------------------------------------------------------
+# V3.10.0 Rolling Dashboards + Feature Learning Overrides
+# ---------------------------------------------------------------------------
+# These overrides intentionally sit after the V3.9 functions so Python uses the
+# upgraded versions at runtime without disturbing the core live-betting engine.
+# Goals:
+#   1) keep the master decision database practical and durable;
+#   2) preserve near-closing line snapshots inside the decision log;
+#   3) add 7-day / 30-day / season dashboards;
+#   4) add controlled feature-level learning on top of profile-level learning;
+#   5) cap adaptive adjustments so the model cannot overreact to noise.
+
+FEATURE_LEARNING_FILE = os.getenv("FEATURE_LEARNING_FILE", "feature_learning_summary.csv")
+ENABLE_FEATURE_LEARNING = os.getenv("ENABLE_FEATURE_LEARNING", "true").lower() == "true"
+ENABLE_ROLLING_DECISION_DASHBOARD = os.getenv("ENABLE_ROLLING_DECISION_DASHBOARD", "true").lower() == "true"
+MIN_FEATURE_SAMPLE = int(os.getenv("MIN_FEATURE_SAMPLE", "50"))
+FEATURE_STRONG_ROI = float(os.getenv("FEATURE_STRONG_ROI", "0.035"))
+FEATURE_WEAK_ROI = float(os.getenv("FEATURE_WEAK_ROI", "-0.025"))
+FEATURE_STRONG_CLV = float(os.getenv("FEATURE_STRONG_CLV", "0.20"))
+FEATURE_WEAK_CLV = float(os.getenv("FEATURE_WEAK_CLV", "-0.20"))
+FEATURE_PROVEN_CONF_BONUS = int(os.getenv("FEATURE_PROVEN_CONF_BONUS", "2"))
+FEATURE_TIGHTEN_CONF_PENALTY = int(os.getenv("FEATURE_TIGHTEN_CONF_PENALTY", "3"))
+MAX_TOTAL_ADAPTIVE_CONF_ADJ = int(os.getenv("MAX_TOTAL_ADAPTIVE_CONF_ADJ", "8"))
+MIN_CLV_SAMPLE_FOR_ADAPTIVE = int(os.getenv("MIN_CLV_SAMPLE_FOR_ADAPTIVE", "25"))
+DECISION_SEASON_START_DATE = os.getenv("DECISION_SEASON_START_DATE", "2026-03-01")
+
+
+def _parse_iso_date_safe(value):
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date()
+    except Exception:
+        return None
+
+
+def _row_date(row):
+    return _parse_iso_date_safe((row or {}).get("date"))
+
+
+def _days_back_rows(rows, report_date, days):
+    end = _parse_iso_date_safe(report_date or today())
+    if not end:
+        return rows or []
+    start_ord = end.toordinal() - int(days) + 1
+    out = []
+    for r in rows or []:
+        d = _row_date(r)
+        if d and start_ord <= d.toordinal() <= end.toordinal():
+            out.append(r)
+    return out
+
+
+def _season_rows(rows):
+    start = _parse_iso_date_safe(DECISION_SEASON_START_DATE)
+    if not start:
+        return rows or []
+    return [r for r in (rows or []) if _row_date(r) and _row_date(r) >= start]
+
+
+def _graded_decision_rows(actions=None):
+    actions = set(actions or ["BET_NOW", "TEST_UNIT"])
+    return [
+        r for r in csv_read_rows(DECISION_LOG_FILE)
+        if r.get("result") in ["WIN", "LOSS", "PUSH"] and r.get("action") in actions
+    ]
+
+
+def _summarize_units_and_clv(rows):
+    rows = rows or []
+    w, l, p, pct, units = summarize_record(rows)
+    clvs = [safe_float(r.get("clv"), None) for r in rows if safe_float(r.get("clv"), None) is not None]
+    avg_clv = round(avg(clvs), 2) if clvs else ""
+    clv_sample = len(clvs)
+    return w, l, p, pct, units, avg_clv, clv_sample
+
+
+def decision_log_fieldnames():
+    # Superset of V3.9 fields. csv.DictWriter extrasaction="ignore" means older rows remain safe.
+    return [
+        "decision_id", "timestamp", "date", "game_key", "game_pk", "game",
+        "action", "decision_type", "reject_reason",
+        "profile", "scenario", "side", "line", "price", "book",
+        "opening_total", "first_seen_total", "true_opening_total", "live_total",
+        "projected_total", "edge", "confidence", "expected_value",
+        "inning", "inning_state", "outs", "score", "base_out",
+        "projection_score", "confirmation_score", "market_confirmation_score",
+        "market_value_score", "risk_filter_score", "calculated_risk_tier", "suggested_unit",
+        "pressure_to_runs", "run_conversion", "traffic_conversion", "pitcher_stress",
+        "contact_quality", "bullpen_risk", "run_prevention", "strikeout_environment",
+        "bullpen_lockdown", "settle_down_score", "continuation_score",
+        "discounted_over_score", "false_inflation_score", "continuation_exhaustion_score",
+        "pitching_dominance_under_score", "market_reaction_move", "market_discount",
+        "consensus_total", "market_min_total", "market_max_total", "market_disagreement",
+        "line_velocity", "line_direction", "book_count", "recommended_book",
+        "recommended_total", "recommended_price", "best_line_age_seconds",
+        "adaptive_status", "adaptive_confidence_adjustment", "adaptive_profile_adjustment",
+        "adaptive_feature_adjustment", "adaptive_sample", "adaptive_roi", "adaptive_avg_clv",
+        "pattern_tags", "bet_quality", "quality_reason",
+        "last_live_total", "last_clv_snapshot_at", "last_clv_snapshot_type", "closing_total_estimate",
+        "final_score", "final_total", "result", "units", "clv", "graded_at",
+    ]
+
+
+def feature_learning_fieldnames():
+    return [
+        "feature_key", "sample", "wins", "losses", "pushes", "win_pct", "units",
+        "roi", "avg_clv", "clv_sample", "status", "confidence_adjustment", "updated_at"
+    ]
+
+
+def feature_keys_from_decision_row(row):
+    row = row or {}
+    keys = []
+    profile = row.get("profile") or "UNCLASSIFIED"
+    side = str(row.get("side") or "").upper()
+    action = row.get("action") or ""
+    if profile:
+        keys.append(f"PROFILE:{profile}")
+    if side:
+        keys.append(f"SIDE:{side}")
+        keys.append(f"PROFILE_SIDE:{profile}:{side}")
+    tier = row.get("calculated_risk_tier") or ""
+    if tier:
+        keys.append(f"TIER:{tier}")
+    inning = safe_int(row.get("inning"), 0)
+    if inning:
+        if inning <= 3:
+            keys.append("INNING:EARLY_1_3")
+        elif inning <= 6:
+            keys.append("INNING:MIDDLE_4_6")
+        else:
+            keys.append("INNING:LATE_7_PLUS")
+    price = safe_int(row.get("price"), 0)
+    if price:
+        if price <= -130:
+            keys.append("PRICE:EXPENSIVE_FAVORITE")
+        elif -129 <= price <= -105:
+            keys.append("PRICE:STANDARD")
+        elif price >= 100:
+            keys.append("PRICE:PLUS_MONEY")
+    try:
+        tags = [t for t in str(row.get("pattern_tags") or "").split("|") if t]
+    except Exception:
+        tags = []
+    for t in tags[:8]:
+        keys.append(f"TAG:{t}")
+    for metric, threshold in [
+        ("pressure_to_runs", 85), ("run_conversion", 80), ("traffic_conversion", 75),
+        ("pitcher_stress", 80), ("contact_quality", 75), ("bullpen_risk", 70),
+        ("settle_down_score", 70), ("continuation_score", 80), ("discounted_over_score", 70),
+        ("pitching_dominance_under_score", 70),
+    ]:
+        if safe_int(row.get(metric), 0) >= threshold:
+            keys.append(f"METRIC:{metric.upper()}_{threshold}_PLUS")
+    if action:
+        keys.append(f"ACTION:{action}")
+    # Dedupe while preserving order.
+    seen = set()
+    clean = []
+    for k in keys:
+        if k and k not in seen:
+            seen.add(k)
+            clean.append(k)
+    return clean
+
+
+def build_feature_learning_summary():
+    if not ENABLE_FEATURE_LEARNING:
+        return []
+    rows = _graded_decision_rows(actions=["BET_NOW", "TEST_UNIT"])
+    buckets = {}
+    for r in rows:
+        for key in feature_keys_from_decision_row(r):
+            buckets.setdefault(key, []).append(r)
+
+    out = []
+    now_iso = now_local().isoformat()
+    for key, bucket in sorted(buckets.items(), key=lambda kv: len(kv[1]), reverse=True):
+        w, l, p, pct, units, avg_clv, clv_sample = _summarize_units_and_clv(bucket)
+        sample = len(bucket)
+        roi = round(units / max(1, len([x for x in bucket if x.get("result") in ["WIN", "LOSS"]])), 4)
+        avg_clv_num = safe_float(avg_clv, 0) if avg_clv != "" else 0
+        if sample < MIN_FEATURE_SAMPLE:
+            status = "OPEN_TEST"
+            adj = 0
+        elif roi >= FEATURE_STRONG_ROI and clv_sample >= MIN_CLV_SAMPLE_FOR_ADAPTIVE and avg_clv_num >= FEATURE_STRONG_CLV:
+            status = "PROVEN"
+            adj = FEATURE_PROVEN_CONF_BONUS
+        elif roi <= FEATURE_WEAK_ROI or (clv_sample >= MIN_CLV_SAMPLE_FOR_ADAPTIVE and avg_clv_num <= FEATURE_WEAK_CLV):
+            status = "TIGHTEN"
+            adj = -FEATURE_TIGHTEN_CONF_PENALTY
+        else:
+            status = "HOLD"
+            adj = 0
+        out.append({
+            "feature_key": key,
+            "sample": sample,
+            "wins": w,
+            "losses": l,
+            "pushes": p,
+            "win_pct": pct,
+            "units": units,
+            "roi": roi,
+            "avg_clv": avg_clv,
+            "clv_sample": clv_sample,
+            "status": status,
+            "confidence_adjustment": adj,
+            "updated_at": now_iso,
+        })
+    csv_write_rows(FEATURE_LEARNING_FILE, feature_learning_fieldnames(), out)
+    return out
+
+
+def build_adaptive_config_from_results():
+    """
+    V3.10 profile config: requires mature sample and enough CLV observations before
+    applying positive upgrades. Negative protection can trigger on ROI even when CLV is sparse.
+    """
+    if not ENABLE_ADAPTIVE_CONFIG:
+        return {}
+    rows = _graded_decision_rows(actions=["BET_NOW", "TEST_UNIT"])
+    profiles = {}
+    for r in rows:
+        profile = r.get("profile") or r.get("market_reaction_profile") or "UNCLASSIFIED"
+        profiles.setdefault(profile, []).append(r)
+
+    config = {}
+    for profile, bucket in profiles.items():
+        w, l, p, pct, units, avg_clv, clv_sample = _summarize_units_and_clv(bucket)
+        sample = len(bucket)
+        risked = max(1, len([x for x in bucket if x.get("result") in ["WIN", "LOSS"]]))
+        roi = round(units / risked, 4)
+        avg_clv_num = safe_float(avg_clv, 0) if avg_clv != "" else 0
+        if sample < MIN_ADAPTIVE_SAMPLE:
+            status = "OPEN_TEST"
+            conf_adj = 0
+            tier_bias = "none"
+        elif roi >= ADAPTIVE_STRONG_ROI and clv_sample >= MIN_CLV_SAMPLE_FOR_ADAPTIVE and avg_clv_num >= ADAPTIVE_STRONG_CLV:
+            status = "PROVEN"
+            conf_adj = min(ADAPTIVE_PROVEN_CONF_BONUS, MAX_TOTAL_ADAPTIVE_CONF_ADJ)
+            tier_bias = "upgrade"
+        elif roi <= ADAPTIVE_WEAK_ROI and clv_sample >= MIN_CLV_SAMPLE_FOR_ADAPTIVE and avg_clv_num <= ADAPTIVE_WEAK_CLV:
+            status = "FAILING"
+            conf_adj = -min(ADAPTIVE_FAILING_CONF_PENALTY, MAX_TOTAL_ADAPTIVE_CONF_ADJ)
+            tier_bias = "downgrade"
+        elif roi <= ADAPTIVE_WEAK_ROI or (clv_sample >= MIN_CLV_SAMPLE_FOR_ADAPTIVE and avg_clv_num <= ADAPTIVE_WEAK_CLV):
+            status = "TIGHTEN"
+            conf_adj = -min(ADAPTIVE_TIGHTEN_CONF_PENALTY, MAX_TOTAL_ADAPTIVE_CONF_ADJ)
+            tier_bias = "downgrade"
+        else:
+            status = "HOLD"
+            conf_adj = 0
+            tier_bias = "none"
+        config[profile] = {
+            "sample": sample,
+            "wins": w,
+            "losses": l,
+            "pushes": p,
+            "win_pct": pct,
+            "units": units,
+            "roi": roi,
+            "avg_clv": avg_clv,
+            "clv_sample": clv_sample,
+            "status": status,
+            "confidence_adjustment": conf_adj,
+            "tier_bias": tier_bias,
+            "updated_at": now_local().isoformat(),
+        }
+    save_adaptive_config(config)
+    build_feature_learning_summary()
+    return config
+
+
+def _feature_adjustment_for_opportunity(opportunity):
+    if not ENABLE_FEATURE_LEARNING or not opportunity:
+        return 0, []
+    rows = csv_read_rows(FEATURE_LEARNING_FILE)
+    if not rows:
+        rows = build_feature_learning_summary()
+    by_key = {r.get("feature_key"): r for r in rows}
+    pseudo_row = {
+        "profile": market_reaction_profile_from_scores(opportunity.get("scores", {}) or {}, opportunity.get("scenario")),
+        "side": opportunity.get("side"),
+        "calculated_risk_tier": opportunity.get("calculated_risk_tier"),
+        "price": opportunity.get("price") or opportunity.get("recommended_price"),
+        "inning": opportunity.get("inning"),
+        "pattern_tags": opportunity.get("pattern_tags", ""),
+    }
+    # Add score metrics for feature matching.
+    for k, v in (opportunity.get("scores", {}) or {}).items():
+        pseudo_row[k] = v
+    matched = []
+    total = 0
+    for key in feature_keys_from_decision_row(pseudo_row):
+        rec = by_key.get(key)
+        if not rec:
+            continue
+        adj = safe_int(rec.get("confidence_adjustment"), 0)
+        if adj:
+            matched.append(f"{key}:{adj:+d}")
+            total += adj
+    # Feature learning should be a nudge, not a steering wheel.
+    total = max(-4, min(4, total))
+    return total, matched[:6]
+
+
+def apply_adaptive_adjustment(opportunity):
+    if not ENABLE_ADAPTIVE_CONFIG or not ENABLE_ADAPTIVE_CONFIDENCE or not opportunity:
+        return opportunity
+    opportunity = dict(opportunity)
+    scores = opportunity.get("scores", {}) or {}
+    profile = market_reaction_profile_from_scores(scores, opportunity.get("scenario"))
+    config = load_adaptive_config()
+    if not config:
+        config = build_adaptive_config_from_results()
+    profile_cfg = config.get(profile, {})
+    profile_adj = safe_int(profile_cfg.get("confidence_adjustment"), 0)
+    feature_adj, feature_matches = _feature_adjustment_for_opportunity(opportunity)
+    total_adj = max(-MAX_TOTAL_ADAPTIVE_CONF_ADJ, min(MAX_TOTAL_ADAPTIVE_CONF_ADJ, profile_adj + feature_adj))
+
+    original_conf = safe_int(opportunity.get("confidence"), 0)
+    opportunity["confidence"] = clamp(original_conf + total_adj)
+    opportunity["adaptive_status"] = profile_cfg.get("status", "OPEN_TEST" if profile else "")
+    opportunity["adaptive_confidence_adjustment"] = total_adj
+    opportunity["adaptive_profile_adjustment"] = profile_adj
+    opportunity["adaptive_feature_adjustment"] = feature_adj
+    opportunity["adaptive_feature_matches"] = "|".join(feature_matches)
+    opportunity["adaptive_sample"] = profile_cfg.get("sample", 0)
+    opportunity["adaptive_roi"] = profile_cfg.get("roi", "")
+    opportunity["adaptive_avg_clv"] = profile_cfg.get("avg_clv", "")
+    return opportunity
+
+
+def update_decision_log_clv_snapshots(info, live_total):
+    """
+    V3.10: write the latest live total into every pending decision row for the same game.
+    This creates a practical near-closing estimate because the final live poll before FINAL
+    becomes the row's latest CLV snapshot. No extra API call is used.
+    """
+    if not ENABLE_DECISION_LOG or not ENABLE_CLV_TRACKING:
+        return
+    current_line = safe_float(live_total, None)
+    if current_line is None:
+        return
+    rows = csv_read_rows(DECISION_LOG_FILE)
+    if not rows:
+        return
+    info = info or {}
+    changed = False
+    for row in rows:
+        if row.get("date") != today():
+            continue
+        if row.get("action") not in ["BET_NOW", "TEST_UNIT", "RESEARCH_ONLY", "NO_BET"]:
+            continue
+        if row.get("result") in ["WIN", "LOSS", "PUSH"]:
+            continue
+        same_game = row.get("game_pk") == str(info.get("game_pk")) or row.get("game") == f"{info.get('away')} at {info.get('home')}"
+        if not same_game:
+            continue
+        side = str(row.get("side", "")).upper()
+        alert_line = safe_float(row.get("line"), None)
+        if side not in ["OVER", "UNDER"] or alert_line is None:
+            continue
+        clv = round(current_line - alert_line, 1) if side == "OVER" else round(alert_line - current_line, 1)
+        old_clv = safe_float(row.get("clv"), None)
+        # Always keep the latest line metadata, but only rewrite CLV if it changed enough or was blank.
+        row["last_live_total"] = current_line
+        row["last_clv_snapshot_at"] = now_local().isoformat()
+        row["last_clv_snapshot_type"] = "poll_update"
+        row["closing_total_estimate"] = current_line
+        if old_clv is None or abs(clv - old_clv) >= CLV_SNAPSHOT_MIN_MOVE:
+            row["clv"] = clv
+        changed = True
+    if changed:
+        csv_write_rows(DECISION_LOG_FILE, decision_log_fieldnames(), rows)
+
+
+def grade_completed_decision_log(game_pk, label, final_score):
+    if not ENABLE_DECISION_LOG:
+        return
+    final_total = final_total_from_score(final_score)
+    if final_total is None:
+        return
+    rows = csv_read_rows(DECISION_LOG_FILE)
+    if not rows:
+        return
+    changed = False
+    for row in rows:
+        if str(row.get("game_pk")) != str(game_pk):
+            continue
+        if row.get("result") in ["WIN", "LOSS", "PUSH"]:
+            continue
+        side = str(row.get("side", "")).upper()
+        line = safe_float(row.get("line"), None)
+        if side not in ["OVER", "UNDER"] or line is None:
+            continue
+        result = grade_bet(side, line, final_total)
+        row["final_score"] = final_score
+        row["final_total"] = final_total
+        row["result"] = result
+        row["units"] = american_odds_profit_units(row.get("price"), result)
+        # Preserve best available near-close CLV. If no poll snapshot ever occurred,
+        # use last_live_total/closing_total_estimate as fallback before leaving blank.
+        if row.get("clv") in [None, ""]:
+            closing_est = safe_float(row.get("closing_total_estimate"), None)
+            if closing_est is None:
+                closing_est = safe_float(row.get("last_live_total"), None)
+            if closing_est is not None:
+                row["clv"] = round(closing_est - line, 1) if side == "OVER" else round(line - closing_est, 1)
+        row["graded_at"] = now_local().isoformat()
+        changed = True
+    if changed:
+        csv_write_rows(DECISION_LOG_FILE, decision_log_fieldnames(), rows)
+        build_adaptive_config_from_results()
+
+
+def _bucket_lines(title, rows, limit=8):
+    lines = [title]
+    if not rows:
+        lines.append("• No graded rows yet.")
+        return lines
+    buckets = {}
+    for r in rows:
+        key = r.get("profile") or "UNCLASSIFIED"
+        buckets.setdefault(key, []).append(r)
+    for key, bucket in sorted(buckets.items(), key=lambda kv: abs(summarize_record(kv[1])[4]), reverse=True)[:limit]:
+        w, l, p, pct, units, avg_clv, clv_sample = _summarize_units_and_clv(bucket)
+        clv_text = f" | CLV {avg_clv:+.2f} ({clv_sample})" if avg_clv != "" else " | CLV building"
+        lines.append(f"• {key}: {w}-{l}-{p} | {pct}% | {units:+.2f}u{clv_text}")
+    return lines
+
+
+def decision_report_lines(report_date=None):
+    report_date = report_date or today()
+    if not ENABLE_DECISION_LOG:
+        return ["Decision Database: disabled"]
+    rows = csv_read_rows(DECISION_LOG_FILE)
+    if not rows:
+        return ["Decision Database: no decisions logged yet"]
+    today_rows = [r for r in rows if r.get("date") == report_date]
+    graded_today = [r for r in today_rows if r.get("result") in ["WIN", "LOSS", "PUSH"]]
+    pending_today = [r for r in today_rows if r.get("result") in ["", "PENDING"]]
+
+    lines = []
+    lines.append("Decision Database:")
+    for action in ["BET_NOW", "TEST_UNIT", "RESEARCH_ONLY", "NO_BET"]:
+        bucket = [r for r in graded_today if r.get("action") == action]
+        pending = len([r for r in pending_today if r.get("action") == action])
+        if bucket:
+            w, l, p, pct, units, avg_clv, clv_sample = _summarize_units_and_clv(bucket)
+            clv_text = f" | CLV {avg_clv:+.2f} ({clv_sample})" if avg_clv != "" else " | CLV building"
+            lines.append(f"• Today {action}: {w}-{l}-{p} | {pct}% | {units:+.2f}u{clv_text} | Pending {pending}")
+        elif pending:
+            lines.append(f"• Today {action}: {pending} pending")
+
+    if ENABLE_ROLLING_DECISION_DASHBOARD:
+        graded = [r for r in rows if r.get("result") in ["WIN", "LOSS", "PUSH"] and r.get("action") in ["BET_NOW", "TEST_UNIT"]]
+        windows = [
+            ("Last 7 Days", _days_back_rows(graded, report_date, 7)),
+            ("Last 30 Days", _days_back_rows(graded, report_date, 30)),
+            ("Season", _season_rows(graded)),
+        ]
+        for title, bucket in windows:
+            if not bucket:
+                lines.append(f"{title}: building sample")
+                continue
+            w, l, p, pct, units, avg_clv, clv_sample = _summarize_units_and_clv(bucket)
+            clv_text = f" | CLV {avg_clv:+.2f} ({clv_sample})" if avg_clv != "" else " | CLV building"
+            lines.append(f"{title}: {w}-{l}-{p} | {pct}% | {units:+.2f}u{clv_text}")
+        lines.extend(_bucket_lines("Top Season Profiles:", _season_rows(graded), limit=6))
+    return lines
+
+
+def adaptive_report_lines():
+    if not ENABLE_ADAPTIVE_REPORTING:
+        return ["Adaptive Learning: reporting disabled"]
+    config = build_adaptive_config_from_results()
+    lines = []
+    lines.append("Adaptive Profile Learning:")
+    if not config:
+        lines.append("• Building sample — no graded profile decisions yet.")
+    else:
+        for profile, cfg in sorted(config.items(), key=lambda kv: safe_int(kv[1].get("sample"), 0), reverse=True):
+            lines.append(
+                f"• {profile}: {cfg.get('status')} | Sample {cfg.get('sample')} | "
+                f"ROI {safe_float(cfg.get('roi'), 0):+.2%} | "
+                f"CLV {safe_float(cfg.get('avg_clv'), 0):+.2f} ({cfg.get('clv_sample', 0)}) | "
+                f"ConfAdj {cfg.get('confidence_adjustment')}"
+            )
+    if ENABLE_FEATURE_LEARNING:
+        features = build_feature_learning_summary()
+        proven = [f for f in features if f.get("status") in ["PROVEN", "TIGHTEN"]]
+        lines.append("Feature Learning:")
+        if not proven:
+            lines.append(f"• Building sample — feature decisions need {MIN_FEATURE_SAMPLE}+ graded rows.")
+        else:
+            for f in sorted(proven, key=lambda x: abs(safe_float(x.get("units"), 0)), reverse=True)[:8]:
+                lines.append(
+                    f"• {f.get('feature_key')}: {f.get('status')} | Sample {f.get('sample')} | "
+                    f"ROI {safe_float(f.get('roi'), 0):+.2%} | CLV {safe_float(f.get('avg_clv'), 0):+.2f} "
+                    f"({f.get('clv_sample')}) | ConfAdj {f.get('confidence_adjustment')}"
+                )
+    lines.append(f"Adaptive safety: total confidence adjustment capped at ±{MAX_TOTAL_ADAPTIVE_CONF_ADJ}.")
+    return lines
+
+
+_v390_generate_daily_learning_report = generate_daily_learning_report
+
+
+def generate_daily_learning_report(report_date=None):
+    report_date = report_date or today()
+    text = _v390_generate_daily_learning_report(report_date)
+    # V3.9 returned early when no STRIKE results existed. V3.10 still reports the
+    # decision database and adaptive state so test/research/no-bet tracking is visible.
+    if "No graded STRIKE results found yet" in text:
+        lines = text.split("\n")
+        lines.append("")
+        for dl in decision_report_lines(report_date):
+            lines.append(dl)
+        lines.append("")
+        for al in adaptive_report_lines():
+            lines.append(al)
+        return "\n".join(lines)
+    return text
+
 
 
 if __name__ == "__main__":
