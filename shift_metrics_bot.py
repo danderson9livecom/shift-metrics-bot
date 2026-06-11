@@ -59,10 +59,10 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # SHIFT deployment identity / anti-confusion banner
 # ---------------------------------------------------------------------------
-APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.7.8")
-APP_MODE = "CONTINUATION EXHAUSTION + PROFILE STRENGTH + NEUTRAL WATCH ONLY"
+APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.8.0")
+APP_MODE = "UNDER TEST ALERTS + DISCOUNTED OVER PROTECTION"
 APP_BUILD_LABEL = f"SHIFT MLB {APP_VERSION} {APP_MODE}"
-DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-continuation-exhaustion-profile-strength")
+DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-under-test-alerts-discounted-over-protection")
 RUN_EMAIL_TEST_ON_START = os.getenv("RUN_EMAIL_TEST_ON_START", "false").lower() == "true"
 
 TZ = ZoneInfo("America/Phoenix")
@@ -73,6 +73,7 @@ CLV_HISTORY_FILE = os.getenv("CLV_HISTORY_FILE", "clv_history.csv")
 GRADED_RESULTS_FILE = os.getenv("GRADED_RESULTS_FILE", "graded_results.csv")
 LEARNING_SUMMARY_FILE = os.getenv("LEARNING_SUMMARY_FILE", "learning_summary.csv")
 PROFILE_NEAR_MISS_FILE = os.getenv("PROFILE_NEAR_MISS_FILE", "profile_near_misses.csv")
+PROFILE_RESEARCH_FILE = os.getenv("PROFILE_RESEARCH_FILE", "profile_research_candidates.csv")
 PROFILE_LEARNING_SUMMARY_FILE = os.getenv("PROFILE_LEARNING_SUMMARY_FILE", "profile_learning_summary.csv")
 ENABLE_SELF_LEARNING = os.getenv("ENABLE_SELF_LEARNING", "true").lower() == "true"
 
@@ -152,6 +153,58 @@ PROFILE_HISTORY_STRONG_WIN_PCT = float(os.getenv("PROFILE_HISTORY_STRONG_WIN_PCT
 PROFILE_HISTORY_WEAK_WIN_PCT = float(os.getenv("PROFILE_HISTORY_WEAK_WIN_PCT", "52"))
 PROFILE_HISTORY_STRONG_BOOST = int(os.getenv("PROFILE_HISTORY_STRONG_BOOST", "4"))
 PROFILE_HISTORY_WEAK_PENALTY = int(os.getenv("PROFILE_HISTORY_WEAK_PENALTY", "4"))
+
+# V3.7.9 professional discipline controls:
+# Discounted OVER is currently the strongest profile, so do not rewrite it.
+# Instead, protect it from weak late-game spots and identify elite Tier A setups.
+ENABLE_DISCOUNTED_OVER_LATE_DISCIPLINE = os.getenv("ENABLE_DISCOUNTED_OVER_LATE_DISCIPLINE", "true").lower() == "true"
+DISCOUNTED_OVER_LATE_INNING = int(os.getenv("DISCOUNTED_OVER_LATE_INNING", "7"))
+DISCOUNTED_OVER_LATE_MAX_RISK = int(os.getenv("DISCOUNTED_OVER_LATE_MAX_RISK", "39"))
+DISCOUNTED_OVER_LATE_MIN_EDGE = float(os.getenv("DISCOUNTED_OVER_LATE_MIN_EDGE", "4.0"))
+DISCOUNTED_OVER_LATE_MIN_THREAT = int(os.getenv("DISCOUNTED_OVER_LATE_MIN_THREAT", "80"))
+DISCOUNTED_OVER_LATE_MIN_TRAFFIC = int(os.getenv("DISCOUNTED_OVER_LATE_MIN_TRAFFIC", "75"))
+DISCOUNTED_OVER_LATE_MIN_P2R = int(os.getenv("DISCOUNTED_OVER_LATE_MIN_P2R", "90"))
+DISCOUNTED_OVER_LATE_MIN_CONV = int(os.getenv("DISCOUNTED_OVER_LATE_MIN_CONV", "85"))
+
+ENABLE_DISCOUNTED_OVER_TIER_A = os.getenv("ENABLE_DISCOUNTED_OVER_TIER_A", "true").lower() == "true"
+DISCOUNTED_OVER_TIER_A_SCORE = int(os.getenv("DISCOUNTED_OVER_TIER_A_SCORE", "78"))
+DISCOUNTED_OVER_TIER_A_VALUE = int(os.getenv("DISCOUNTED_OVER_TIER_A_VALUE", "95"))
+DISCOUNTED_OVER_TIER_A_MAX_RISK = int(os.getenv("DISCOUNTED_OVER_TIER_A_MAX_RISK", "10"))
+DISCOUNTED_OVER_TIER_A_EDGE = float(os.getenv("DISCOUNTED_OVER_TIER_A_EDGE", "6.0"))
+DISCOUNTED_OVER_TIER_A_MAX_INNING = int(os.getenv("DISCOUNTED_OVER_TIER_A_MAX_INNING", "6"))
+
+# Research mode: log rare UNDER profile candidates even when they do not send SMS.
+# This lets us learn whether INFLATED_UNDER and PITCHING_DOMINANCE_UNDER are real edges.
+ENABLE_PROFILE_RESEARCH_DATABASE = os.getenv("ENABLE_PROFILE_RESEARCH_DATABASE", "true").lower() == "true"
+PROFILE_RESEARCH_PITCHING_MIN_SCORE = int(os.getenv("PROFILE_RESEARCH_PITCHING_MIN_SCORE", "55"))
+PROFILE_RESEARCH_LOG_DISCOUNTED_OVER = os.getenv("PROFILE_RESEARCH_LOG_DISCOUNTED_OVER", "true").lower() == "true"
+PROFILE_RESEARCH_LOG_UNDER_CANDIDATES = os.getenv("PROFILE_RESEARCH_LOG_UNDER_CANDIDATES", "true").lower() == "true"
+
+# V3.8.0 controlled UNDER profile test alerts:
+# These make INFLATED_UNDER and PITCHING_DOMINANCE_UNDER fire as Tier C / TEST UNIT
+# so the bot can collect real promoted samples and learn without overexposing bankroll.
+ENABLE_UNDER_PROFILE_TEST_ALERTS = os.getenv("ENABLE_UNDER_PROFILE_TEST_ALERTS", "true").lower() == "true"
+UNDER_TEST_FORCE_TIER_C = os.getenv("UNDER_TEST_FORCE_TIER_C", "true").lower() == "true"
+UNDER_TEST_UNIT_LABEL = os.getenv("UNDER_TEST_UNIT_LABEL", "TEST UNIT")
+
+INFLATED_UNDER_TEST_MIN_SETTLE = int(os.getenv("INFLATED_UNDER_TEST_MIN_SETTLE", "68"))
+INFLATED_UNDER_TEST_MAX_CONTINUATION = int(os.getenv("INFLATED_UNDER_TEST_MAX_CONTINUATION", "72"))
+INFLATED_UNDER_TEST_MIN_MOVE = float(os.getenv("INFLATED_UNDER_TEST_MIN_MOVE", "2.0"))
+INFLATED_UNDER_TEST_MIN_EDGE = float(os.getenv("INFLATED_UNDER_TEST_MIN_EDGE", "0.50"))
+INFLATED_UNDER_TEST_MAX_RISK = int(os.getenv("INFLATED_UNDER_TEST_MAX_RISK", "55"))
+INFLATED_UNDER_TEST_MAX_PRESSURE = int(os.getenv("INFLATED_UNDER_TEST_MAX_PRESSURE", "75"))
+INFLATED_UNDER_TEST_MAX_TRAFFIC = int(os.getenv("INFLATED_UNDER_TEST_MAX_TRAFFIC", "82"))
+
+PITCHING_DOMINANCE_TEST_MIN_SCORE = int(os.getenv("PITCHING_DOMINANCE_TEST_MIN_SCORE", "62"))
+PITCHING_DOMINANCE_TEST_OPEN_MAX = float(os.getenv("PITCHING_DOMINANCE_TEST_OPEN_MAX", "8.5"))
+PITCHING_DOMINANCE_TEST_MIN_INNING = int(os.getenv("PITCHING_DOMINANCE_TEST_MIN_INNING", "2"))
+PITCHING_DOMINANCE_TEST_MAX_INNING = int(os.getenv("PITCHING_DOMINANCE_TEST_MAX_INNING", "5"))
+PITCHING_DOMINANCE_TEST_MAX_RUNS = int(os.getenv("PITCHING_DOMINANCE_TEST_MAX_RUNS", "2"))
+PITCHING_DOMINANCE_TEST_MAX_LIVE_DROP = float(os.getenv("PITCHING_DOMINANCE_TEST_MAX_LIVE_DROP", "1.75"))
+PITCHING_DOMINANCE_TEST_MAX_CONTACT = int(os.getenv("PITCHING_DOMINANCE_TEST_MAX_CONTACT", "55"))
+PITCHING_DOMINANCE_TEST_MAX_STRESS = int(os.getenv("PITCHING_DOMINANCE_TEST_MAX_STRESS", "65"))
+PITCHING_DOMINANCE_TEST_MAX_P2R = int(os.getenv("PITCHING_DOMINANCE_TEST_MAX_P2R", "82"))
+PITCHING_DOMINANCE_TEST_MIN_EDGE = float(os.getenv("PITCHING_DOMINANCE_TEST_MIN_EDGE", "0.35"))
 
 # V3.7.7 neutral-market discipline:
 # June 5-7 reports showed NEUTRAL_MARKET was the major leak.
@@ -2116,6 +2169,8 @@ def calculated_risk_tier(opportunity, market_context=None):
     hist = historical_profile_tier_adjustment(profile, opportunity.get("side"))
     profile_boost += hist
     tier_score = conf + profile_boost
+    if is_discounted_over_tier_a({"inning": safe_int(scores.get("inning"), 0)}, opportunity, scores):
+        return "A"
     if tier_score >= CALCULATED_RISK_TIER_A_CONF and edge >= 2.0 and (ev >= 0.02 or mconf >= 72):
         return "A"
     if tier_score >= CALCULATED_RISK_TIER_B_CONF and edge >= 1.0 and (ev >= 0 or mconf >= 60):
@@ -2162,6 +2217,80 @@ def historical_profile_tier_adjustment(profile, side=None):
     if win_pct < PROFILE_HISTORY_WEAK_WIN_PCT or units < 0:
         return -PROFILE_HISTORY_WEAK_PENALTY
     return 0
+
+
+
+def discounted_over_window(info):
+    """Simple inning bucket for Discounted OVER reporting."""
+    inning = safe_int((info or {}).get("inning"), 0)
+    if inning <= 3:
+        return "EARLY_1_3"
+    if inning <= 6:
+        return "MIDDLE_4_6"
+    return "LATE_7_PLUS"
+
+
+def should_block_late_discounted_over(info, opportunity, scores=None):
+    """
+    V3.7.9: protect the best profile from weak late-game versions.
+    Discounted OVER stays aggressive early/mid, but late innings need immediate
+    traffic/threat quality because time is running out.
+    """
+    if not ENABLE_DISCOUNTED_OVER_LATE_DISCIPLINE:
+        return False, "late discipline disabled"
+    info = info or {}
+    opportunity = opportunity or {}
+    scores = scores or opportunity.get("scores", {}) or {}
+    profile = market_reaction_profile_from_scores(scores, opportunity.get("scenario"))
+    if profile != "DISCOUNTED_OVER" or str(opportunity.get("side", "")).upper() != "OVER":
+        return False, "not Discounted OVER"
+    inning = safe_int(info.get("inning"), safe_int(scores.get("inning"), 0))
+    if inning < DISCOUNTED_OVER_LATE_INNING:
+        return False, "not late"
+    edge = abs(safe_float(opportunity.get("edge"), 0))
+    risk = master_risk_filter_score(opportunity, info, scores)
+    threat = safe_int(scores.get("threat_index"), 0)
+    traffic = safe_int(scores.get("traffic_conversion"), 0)
+    p2r = safe_int(scores.get("pressure_to_runs"), 0)
+    conv = safe_int(scores.get("run_conversion"), 0)
+    if risk <= DISCOUNTED_OVER_LATE_MAX_RISK and edge >= DISCOUNTED_OVER_LATE_MIN_EDGE:
+        return False, "late edge/risk acceptable"
+    elite_live = (
+        threat >= DISCOUNTED_OVER_LATE_MIN_THREAT
+        and traffic >= DISCOUNTED_OVER_LATE_MIN_TRAFFIC
+        and p2r >= DISCOUNTED_OVER_LATE_MIN_P2R
+        and conv >= DISCOUNTED_OVER_LATE_MIN_CONV
+    )
+    if elite_live:
+        return False, "late live traffic elite"
+    return True, (
+        f"late Discounted OVER watch-only: inning={inning} edge={edge:.1f} risk={risk} "
+        f"threat={threat} traffic={traffic} p2r={p2r} conv={conv}"
+    )
+
+
+def is_discounted_over_tier_a(info, opportunity, scores=None):
+    """V3.7.9: elite Discounted OVER deserves Tier A; normal ones remain Tier B/C."""
+    if not ENABLE_DISCOUNTED_OVER_TIER_A:
+        return False
+    info = info or {}
+    opportunity = opportunity or {}
+    scores = scores or opportunity.get("scores", {}) or {}
+    profile = market_reaction_profile_from_scores(scores, opportunity.get("scenario"))
+    if profile != "DISCOUNTED_OVER" or str(opportunity.get("side", "")).upper() != "OVER":
+        return False
+    inning = safe_int(info.get("inning"), safe_int(scores.get("inning"), 0))
+    score = safe_int(scores.get("discounted_over_score"), 0)
+    value = master_market_value_score(opportunity, scores)
+    risk = master_risk_filter_score(opportunity, info, scores)
+    edge = abs(safe_float(opportunity.get("edge"), 0))
+    return (
+        inning <= DISCOUNTED_OVER_TIER_A_MAX_INNING
+        and score >= DISCOUNTED_OVER_TIER_A_SCORE
+        and value >= DISCOUNTED_OVER_TIER_A_VALUE
+        and risk <= DISCOUNTED_OVER_TIER_A_MAX_RISK
+        and edge >= DISCOUNTED_OVER_TIER_A_EDGE
+    )
 
 
 def profile_promotion_min_confidence(profile):
@@ -2246,8 +2375,12 @@ def profile_promotion_reason(info, opportunity, market_context=None):
         return False, f"profile promotion blocked: risk {risk} > {PROFILE_PROMOTE_MAX_RISK}"
 
     if profile == "DISCOUNTED_OVER":
+        late_block, late_reason = should_block_late_discounted_over(info or {}, opportunity, scores)
+        if late_block:
+            return False, late_reason
         ok = side == "OVER" and profile_score >= PROFILE_PROMOTE_DISCOUNTED_MIN_SCORE and edge > 0
-        return ok, f"DISCOUNTED_OVER promotion score={profile_score} value={value} risk={risk}"
+        tier_a_note = " | TierA-eligible" if is_discounted_over_tier_a(info or {}, opportunity, scores) else ""
+        return ok, f"DISCOUNTED_OVER promotion score={profile_score} value={value} risk={risk}{tier_a_note}"
 
     if profile == "CONTINUATION_OVER":
         base_ok = (
@@ -2315,6 +2448,79 @@ def profile_promotion_reason(info, opportunity, market_context=None):
         return ok, f"PITCHING_DOMINANCE_UNDER promotion pd={profile_score} value={value} risk={risk}"
 
     return False, f"profile {profile} did not meet promotion rules"
+
+
+def under_profile_test_alert_reason(info, opportunity, scores):
+    """
+    V3.8.0: Controlled test-alert gate for rare UNDER profiles.
+    This intentionally promotes qualifying INFLATED_UNDER and PITCHING_DOMINANCE_UNDER
+    as Tier C / TEST UNIT so the system can collect real graded samples.
+    """
+    if not ENABLE_UNDER_PROFILE_TEST_ALERTS or not opportunity:
+        return False, "under profile test alerts disabled"
+
+    scores = scores or opportunity.get("scores", {}) or {}
+    profile = market_reaction_profile_from_scores(scores, opportunity.get("scenario"))
+    side = str(opportunity.get("side", "")).upper()
+    if side != "UNDER":
+        return False, "under test alert requires UNDER side"
+
+    edge = safe_float(opportunity.get("edge"), 0)
+    abs_edge = abs(edge)
+    risk = master_risk_filter_score(opportunity, info or {}, scores)
+    move = safe_float(scores.get("market_reaction_move"), 0)
+    settle = safe_int(scores.get("settle_down_score"), 0)
+    cont = safe_int(scores.get("continuation_score"), 0)
+    pressure = safe_int(scores.get("current_inning_pressure"), 0)
+    traffic = safe_int(scores.get("traffic_conversion"), 0)
+    contact = safe_int(scores.get("contact_quality"), 50)
+    stress = safe_int(scores.get("pitcher_stress"), 0)
+    p2r = safe_int(scores.get("pressure_to_runs"), 0)
+    inning = safe_int((info or {}).get("inning"), 0)
+    runs = safe_int((info or {}).get("total_runs"), 0)
+    ref = safe_float(scores.get("market_reaction_reference"), None)
+    live = safe_float(opportunity.get("line"), None)
+    live_drop = safe_float(scores.get("pitching_dominance_live_drop"), 0)
+
+    if profile in ["INFLATED_UNDER", "FALSE_INFLATION_FADE"]:
+        ok = (
+            edge < 0
+            and abs_edge >= INFLATED_UNDER_TEST_MIN_EDGE
+            and move >= INFLATED_UNDER_TEST_MIN_MOVE
+            and settle >= INFLATED_UNDER_TEST_MIN_SETTLE
+            and cont <= INFLATED_UNDER_TEST_MAX_CONTINUATION
+            and risk <= INFLATED_UNDER_TEST_MAX_RISK
+            and pressure <= INFLATED_UNDER_TEST_MAX_PRESSURE
+            and traffic <= INFLATED_UNDER_TEST_MAX_TRAFFIC
+        )
+        return ok, (
+            f"{profile} TEST ALERT settle={settle} cont={cont} move={move:+.1f} "
+            f"edge={abs_edge:.1f} risk={risk} pressure={pressure} traffic={traffic}"
+        )
+
+    if profile == "PITCHING_DOMINANCE_UNDER":
+        pd_score = safe_int(scores.get("pitching_dominance_under_score"), 0)
+        if live_drop == 0 and ref is not None and live is not None:
+            live_drop = round(ref - live, 1)
+        ok = (
+            edge < 0
+            and abs_edge >= PITCHING_DOMINANCE_TEST_MIN_EDGE
+            and pd_score >= PITCHING_DOMINANCE_TEST_MIN_SCORE
+            and (ref is None or ref <= PITCHING_DOMINANCE_TEST_OPEN_MAX)
+            and PITCHING_DOMINANCE_TEST_MIN_INNING <= inning <= PITCHING_DOMINANCE_TEST_MAX_INNING
+            and runs <= PITCHING_DOMINANCE_TEST_MAX_RUNS
+            and live_drop <= PITCHING_DOMINANCE_TEST_MAX_LIVE_DROP
+            and contact <= PITCHING_DOMINANCE_TEST_MAX_CONTACT
+            and stress <= PITCHING_DOMINANCE_TEST_MAX_STRESS
+            and p2r <= PITCHING_DOMINANCE_TEST_MAX_P2R
+            and risk <= PROFILE_PROMOTE_MAX_RISK
+        )
+        return ok, (
+            f"PITCHING_DOMINANCE_UNDER TEST ALERT pd={pd_score} inning={inning} runs={runs} "
+            f"drop={live_drop:.1f} contact={contact} stress={stress} p2r={p2r} risk={risk}"
+        )
+
+    return False, f"profile {profile} is not under-test eligible"
 
 def actual_entry_fieldnames():
     return [
@@ -2390,6 +2596,177 @@ def log_profile_near_miss(info, opportunity, reason, market_context=None):
     }
     csv_append_once(PROFILE_NEAR_MISS_FILE, profile_near_miss_fieldnames(), row)
     print(f"PROFILE NEAR MISS | {row['game']} | {profile} | {row['side']} {row['line']} | {reason}")
+
+
+def profile_research_fieldnames():
+    return [
+        "research_key", "timestamp", "date", "game", "game_pk", "profile", "side", "line", "price",
+        "research_bucket", "reason", "promoted", "action", "confidence", "edge", "inning", "inning_state",
+        "score", "base_out", "opening_total", "live_total", "projected_total", "market_reaction_move",
+        "settle_down_score", "continuation_score", "continuation_exhaustion_score", "false_inflation_score",
+        "discounted_over_score", "pitching_dominance_under_score", "p2r", "conv", "traffic",
+        "contact", "threat", "stress", "bullpen_risk", "risk_score", "value_score", "market_confirmation_score",
+        "expected_value", "final_score", "final_total", "would_have_result", "graded_at",
+    ]
+
+
+def profile_research_append_once(row):
+    """Append research row once per date/game/profile/side/line/inning bucket."""
+    if not ENABLE_PROFILE_RESEARCH_DATABASE:
+        return
+    key = row.get("research_key")
+    if key:
+        existing = csv_read_rows(PROFILE_RESEARCH_FILE)
+        if any(r.get("research_key") == key for r in existing):
+            return
+    csv_append_once(PROFILE_RESEARCH_FILE, profile_research_fieldnames(), row)
+
+
+def log_profile_research_candidate(info, opportunity, reason, market_context=None, promoted=False):
+    """
+    V3.7.9 research database. Logs candidates and near-candidates so rare profiles
+    can be studied even without SMS. No extra API calls and no SMS spam.
+    """
+    if not ENABLE_PROFILE_RESEARCH_DATABASE or not opportunity:
+        return
+    scores = opportunity.get("scores", {}) or {}
+    profile = market_reaction_profile_from_scores(scores, opportunity.get("scenario"))
+    if profile in ["UNCLASSIFIED", "NEUTRAL_MARKET", "DISCOUNTED_NO_BET", "INFLATED_NO_BET"]:
+        return
+    side = str(opportunity.get("side", "")).upper()
+    if profile == "DISCOUNTED_OVER" and not PROFILE_RESEARCH_LOG_DISCOUNTED_OVER:
+        return
+    if profile in ["INFLATED_UNDER", "FALSE_INFLATION_FADE", "PITCHING_DOMINANCE_UNDER"] and not PROFILE_RESEARCH_LOG_UNDER_CANDIDATES:
+        return
+    if profile not in ["DISCOUNTED_OVER", "INFLATED_UNDER", "FALSE_INFLATION_FADE", "PITCHING_DOMINANCE_UNDER"]:
+        return
+    inning = safe_int(info.get("inning"), 0)
+    bucket = discounted_over_window(info) if profile == "DISCOUNTED_OVER" else profile
+    game = f"{info.get('away')} at {info.get('home')}"
+    line = opportunity.get("line")
+    research_key = f"{today()}|{info.get('game_pk','')}|{profile}|{side}|{line}|{inning}|{bucket}"
+    row = {
+        "research_key": research_key,
+        "timestamp": now_local().isoformat(),
+        "date": today(),
+        "game": game,
+        "game_pk": info.get("game_pk", ""),
+        "profile": profile,
+        "side": side,
+        "line": line,
+        "price": opportunity.get("price"),
+        "research_bucket": bucket,
+        "reason": reason,
+        "promoted": "Y" if promoted else "N",
+        "action": opportunity.get("action", "CANDIDATE"),
+        "confidence": opportunity.get("confidence"),
+        "edge": opportunity.get("edge"),
+        "inning": info.get("inning"),
+        "inning_state": info.get("inning_state"),
+        "score": score_text(info),
+        "base_out": f"{(info.get('base_state') or {}).get('label', '')}, {info.get('outs')} out(s)",
+        "opening_total": (market_context or {}).get("opening_total"),
+        "live_total": (market_context or {}).get("live_total", opportunity.get("line")),
+        "projected_total": opportunity.get("projected_total") or opportunity.get("projection"),
+        "market_reaction_move": scores.get("market_reaction_move"),
+        "settle_down_score": scores.get("settle_down_score"),
+        "continuation_score": scores.get("continuation_score"),
+        "continuation_exhaustion_score": scores.get("continuation_exhaustion_score"),
+        "false_inflation_score": scores.get("false_inflation_score"),
+        "discounted_over_score": scores.get("discounted_over_score"),
+        "pitching_dominance_under_score": scores.get("pitching_dominance_under_score"),
+        "p2r": scores.get("pressure_to_runs"),
+        "conv": scores.get("run_conversion"),
+        "traffic": scores.get("traffic_conversion"),
+        "contact": scores.get("contact_quality"),
+        "threat": scores.get("threat_index"),
+        "stress": scores.get("pitcher_stress"),
+        "bullpen_risk": scores.get("bullpen_risk"),
+        "risk_score": master_risk_filter_score(opportunity, info, scores),
+        "value_score": master_market_value_score(opportunity, scores),
+        "market_confirmation_score": (market_context or {}).get("market_confirmation_score"),
+        "expected_value": opportunity.get("expected_value"),
+        "final_score": "",
+        "final_total": "",
+        "would_have_result": "PENDING",
+        "graded_at": "",
+    }
+    profile_research_append_once(row)
+    print(f"PROFILE RESEARCH | {game} | {profile} | {side} {line} | {bucket} | {reason}")
+
+
+def grade_profile_research_candidates(game_pk, label, final_score):
+    """Grade research candidates when a game goes final, even if no SMS was sent."""
+    if not ENABLE_PROFILE_RESEARCH_DATABASE:
+        return
+    final_total = final_total_from_score(final_score)
+    if final_total is None:
+        return
+    rows = csv_read_rows(PROFILE_RESEARCH_FILE)
+    if not rows:
+        return
+    changed = False
+    for row in rows:
+        same_game = (
+            row.get("date") == today()
+            and (row.get("game_pk") == str(game_pk) or row.get("game") == label)
+        )
+        if not same_game:
+            continue
+        if row.get("would_have_result") in ["WIN", "LOSS", "PUSH"]:
+            continue
+        result = grade_bet(row.get("side"), row.get("line"), final_total)
+        row["final_score"] = final_score
+        row["final_total"] = final_total
+        row["would_have_result"] = result
+        row["graded_at"] = now_local().isoformat()
+        changed = True
+    if changed:
+        csv_write_rows(PROFILE_RESEARCH_FILE, profile_research_fieldnames(), rows)
+        print(f"PROFILE RESEARCH GRADED | {label} | Final {final_score}")
+
+
+def profile_research_summary_lines(report_date=None):
+    report_date = report_date or today()
+    rows = [r for r in csv_read_rows(PROFILE_RESEARCH_FILE) if r.get("date") == report_date]
+    lines = []
+    if not rows:
+        lines.append("Profile Research: no candidates logged today.")
+        return lines
+    lines.append("Profile Research Candidates:")
+    by_profile = {}
+    for r in rows:
+        by_profile.setdefault(r.get("profile") or "UNCLASSIFIED", []).append(r)
+    for profile, items in sorted(by_profile.items()):
+        graded = [r for r in items if r.get("would_have_result") in ["WIN", "LOSS", "PUSH"]]
+        promoted = sum(1 for r in items if str(r.get("promoted", "")).upper() == "Y")
+        if graded:
+            wins = sum(1 for r in graded if r.get("would_have_result") == "WIN")
+            losses = sum(1 for r in graded if r.get("would_have_result") == "LOSS")
+            pushes = sum(1 for r in graded if r.get("would_have_result") == "PUSH")
+            pct = round((wins / max(1, wins + losses)) * 100, 1) if (wins + losses) else 0
+            lines.append(f"• {profile}: candidates {len(items)} | promoted {promoted} | would-have {wins}-{losses}-{pushes} | {pct}%")
+        else:
+            lines.append(f"• {profile}: candidates {len(items)} | promoted {promoted} | pending finals")
+    # Discounted OVER sub-buckets reveal whether late versions need discipline.
+    disc = [r for r in rows if r.get("profile") == "DISCOUNTED_OVER"]
+    if disc:
+        bucket_map = {}
+        for r in disc:
+            bucket_map.setdefault(r.get("research_bucket") or "UNKNOWN", []).append(r)
+        parts = []
+        for bucket, items in sorted(bucket_map.items()):
+            graded = [r for r in items if r.get("would_have_result") in ["WIN", "LOSS", "PUSH"]]
+            if graded:
+                w = sum(1 for r in graded if r.get("would_have_result") == "WIN")
+                l = sum(1 for r in graded if r.get("would_have_result") == "LOSS")
+                p = sum(1 for r in graded if r.get("would_have_result") == "PUSH")
+                parts.append(f"{bucket}:{w}-{l}-{p}")
+            else:
+                parts.append(f"{bucket}:{len(items)} pending")
+        lines.append("Discounted OVER Windows: " + ", ".join(parts))
+    return lines
+
 
 def strike_fieldnames():
     return [
@@ -2655,6 +3032,8 @@ def profile_dashboard_lines(report_date=None):
 
     lines = []
     lines.append("Profile Dashboard:")
+    if ENABLE_UNDER_PROFILE_TEST_ALERTS:
+        lines.append("• INFLATED_UNDER and PITCHING_DOMINANCE_UNDER: ACTIVE Tier C / TEST UNIT alert mode.")
     if ENABLE_NEUTRAL_MARKET_WATCH_ONLY:
         lines.append("• NEUTRAL_MARKET: WATCH ONLY / research bucket — no BET NOW SMS promotion.")
     if not all_rows:
@@ -2692,6 +3071,9 @@ def profile_dashboard_lines(report_date=None):
         lines.append(f"Near-Misses Today: {nm_text}")
     else:
         lines.append("Near-Misses Today: none logged")
+
+    for research_line in profile_research_summary_lines(report_date):
+        lines.append(research_line)
 
     lines.append("Dashboard rule: no daily caps; profile history informs confidence/tiering only.")
     return lines
@@ -3259,6 +3641,9 @@ def grade_completed_strikes(game_pk, label, final_score):
     final_total = final_total_from_score(final_score)
     if final_total is None:
         return
+
+    # V3.7.9: grade research candidates even when no SMS strike was sent.
+    grade_profile_research_candidates(game_pk, label, final_score)
 
     rows = csv_read_rows(STRIKE_HISTORY_FILE)
     if not rows:
@@ -4041,6 +4426,12 @@ def v26_final_betnow_gate(state_game, info, market_context, opportunity):
         opportunity["neutral_market_watch_only"] = True
         opportunity["neutral_market_watch_reason"] = NEUTRAL_MARKET_WATCH_REASON
         return False, NEUTRAL_MARKET_WATCH_REASON
+
+    # V3.7.9: Discounted OVER remains live, but weak late-game versions are watch/research only.
+    late_disc_block, late_disc_reason = should_block_late_discounted_over(info, opportunity, opportunity.get("scores", {}))
+    if late_disc_block:
+        log_profile_research_candidate(info, opportunity, late_disc_reason, market_context, promoted=False)
+        return False, late_disc_reason
 
     profile_min_conf = profile_promotion_min_confidence(profile)
     if snap["confidence"] < profile_min_conf:
@@ -7535,20 +7926,25 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
 
     candidates = []
 
-    def add_candidate(side, line, price, cand_edge, cand_scenario, force_action=None):
+    def add_candidate(side, line, price, cand_edge, cand_scenario, force_action=None, profile_override=None):
         nonlocal candidates
         side_scores = dict(base_scores)
+        if profile_override:
+            side_scores["market_reaction_profile"] = profile_override
         gate_ok, gate_reason = market_reaction_side_gate(side, cand_edge, side_scores, info)
         if not gate_ok:
             side_scores = annotate_market_reaction_block(side_scores, gate_reason)
-            tmp_opp = {"side": side, "line": line, "price": price, "edge": round(cand_edge, 1), "scenario": cand_scenario, "scores": side_scores, "confidence": "", "action": "REJECTED"}
+            tmp_opp = {"side": side, "line": line, "price": price, "edge": round(cand_edge, 1), "scenario": cand_scenario, "scores": side_scores, "confidence": "", "action": "REJECTED", "projected_total": projected_total}
             log_profile_near_miss(info, tmp_opp, gate_reason)
+            log_profile_research_candidate(info, tmp_opp, gate_reason, market, promoted=False)
             return
 
         evidence = live_evidence_report(info, p, q, traffic, side_scores, cand_scenario, side=side)
         if not evidence["ok"]:
-            tmp_opp = {"side": side, "line": line, "price": price, "edge": round(cand_edge, 1), "scenario": cand_scenario, "scores": side_scores, "confidence": "", "action": "REJECTED"}
-            log_profile_near_miss(info, tmp_opp, evidence.get("reason", "live evidence rejected"))
+            tmp_opp = {"side": side, "line": line, "price": price, "edge": round(cand_edge, 1), "scenario": cand_scenario, "scores": side_scores, "confidence": "", "action": "REJECTED", "projected_total": projected_total}
+            reject_reason = evidence.get("reason", "live evidence rejected")
+            log_profile_near_miss(info, tmp_opp, reject_reason)
+            log_profile_research_candidate(info, tmp_opp, reject_reason, market, promoted=False)
             return
 
         side_scores["inning"] = safe_int(info.get("inning", 1), 1)
@@ -7562,8 +7958,9 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
         confidence = round(clamp(confidence - safe_int(profile_learning.get("confidence_adjustment"), 0)))
         action = force_action or action_from_confidence(side, confidence, cand_edge, side_scores)
         if action == "NO_PLAY":
-            tmp_opp = {"side": side, "line": line, "price": price, "edge": round(cand_edge, 1), "scenario": cand_scenario, "scores": side_scores, "confidence": confidence, "action": action}
+            tmp_opp = {"side": side, "line": line, "price": price, "edge": round(cand_edge, 1), "scenario": cand_scenario, "scores": side_scores, "confidence": confidence, "action": action, "projected_total": projected_total}
             log_profile_near_miss(info, tmp_opp, "action_from_confidence returned NO_PLAY")
+            log_profile_research_candidate(info, tmp_opp, "action_from_confidence returned NO_PLAY", market, promoted=False)
             return
 
         candidate = {
@@ -7587,8 +7984,27 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
             "profile_avg_clv": profile_learning.get("avg_clv"),
             "profile_confidence_adjustment": profile_learning.get("confidence_adjustment"),
         }
-        candidate["calculated_risk_tier"] = calculated_risk_tier(candidate)
-        candidate["suggested_unit"] = tier_unit_guidance(candidate["calculated_risk_tier"])
+        test_ok, test_reason = under_profile_test_alert_reason(info, candidate, side_scores)
+        if test_ok:
+            candidate["action"] = "STRIKE"
+            candidate["under_profile_test_alert"] = True
+            candidate["profile_promotion_reason"] = test_reason
+            if UNDER_TEST_FORCE_TIER_C:
+                candidate["calculated_risk_tier"] = "C"
+                candidate["suggested_unit"] = UNDER_TEST_UNIT_LABEL
+        candidate["calculated_risk_tier"] = candidate.get("calculated_risk_tier") or calculated_risk_tier(candidate)
+        if is_discounted_over_tier_a(info, candidate, side_scores):
+            candidate["calculated_risk_tier"] = "A"
+        candidate["suggested_unit"] = candidate.get("suggested_unit") or tier_unit_guidance(candidate["calculated_risk_tier"])
+        late_block, late_reason = should_block_late_discounted_over(info, candidate, side_scores)
+        if late_block:
+            candidate["action"] = "WATCH"
+            candidate["discounted_over_late_watch_only"] = True
+            candidate["profile_promotion_reason"] = late_reason
+            log_profile_near_miss(info, candidate, late_reason, market)
+            log_profile_research_candidate(info, candidate, late_reason, market, promoted=False)
+            return
+        log_profile_research_candidate(info, candidate, "candidate_created", market, promoted=(candidate.get("action") == "STRIKE"))
         candidates.append(candidate)
 
     # Standard OVER path.
@@ -7604,18 +8020,41 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
     # old classic UNDER engine would have been too tight, but only if the
     # side-gate says the market reaction is genuinely settling.
     if ENABLE_MARKET_REACTION_ENGINE and base_scores.get("market_reaction_profile") in ["INFLATED_UNDER", "FALSE_INFLATION_FADE"]:
-        if edge <= -INFLATED_UNDER_MIN_EDGE and price_ok(under_price, abs(edge)):
+        research_opp = {"side": "UNDER", "line": live, "price": under_price, "edge": round(edge, 1), "scenario": market_reaction_scenario_label(base_scores.get("market_reaction_profile")), "scores": dict(base_scores), "confidence": "", "action": "CANDIDATE", "projected_total": projected_total}
+        log_profile_research_candidate(info, research_opp, "inflated_under_profile_detected", market, promoted=False)
+        inflated_test_edge_ok = edge <= -min(INFLATED_UNDER_MIN_EDGE, INFLATED_UNDER_TEST_MIN_EDGE)
+        if inflated_test_edge_ok and price_ok(under_price, abs(edge)):
             add_candidate(
                 "UNDER",
                 live,
                 under_price,
                 edge,
                 market_reaction_scenario_label(base_scores.get("market_reaction_profile")),
+                force_action="STRIKE",
             )
 
     # V3.7.2 Pitching Dominance UNDER:
     # This is an early calculated-risk UNDER path for low-open games where true
     # suppression is showing before the live total fully collapses.
+    if ENABLE_PITCHING_DOMINANCE_UNDER and safe_int(base_scores.get("pitching_dominance_under_score"), 0) >= PROFILE_RESEARCH_PITCHING_MIN_SCORE:
+        pd_research_edge = edge if edge <= 0 else -PITCHING_DOMINANCE_MIN_EDGE
+        pd_scores = dict(base_scores, market_reaction_profile="PITCHING_DOMINANCE_UNDER")
+        pd_research_opp = {"side": "UNDER", "line": live, "price": under_price, "edge": round(pd_research_edge, 1), "scenario": market_reaction_scenario_label("PITCHING_DOMINANCE_UNDER"), "scores": pd_scores, "confidence": "", "action": "CANDIDATE", "projected_total": projected_total}
+        log_profile_research_candidate(info, pd_research_opp, "pitching_dominance_candidate_score_threshold", market, promoted=False)
+
+        pd_score = safe_int(base_scores.get("pitching_dominance_under_score"), 0)
+        pd_edge = edge if edge <= 0 else -PITCHING_DOMINANCE_TEST_MIN_EDGE
+        if pd_score >= PITCHING_DOMINANCE_TEST_MIN_SCORE and price_ok(under_price, abs(pd_edge)):
+            add_candidate(
+                "UNDER",
+                live,
+                under_price,
+                pd_edge,
+                market_reaction_scenario_label("PITCHING_DOMINANCE_UNDER"),
+                force_action="STRIKE",
+                profile_override="PITCHING_DOMINANCE_UNDER",
+            )
+
     if ENABLE_PITCHING_DOMINANCE_UNDER and base_scores.get("pitching_dominance_under_ok"):
         pd_edge = edge
         if pd_edge > -PITCHING_DOMINANCE_MIN_EDGE:
@@ -7627,6 +8066,8 @@ def detect_total_opportunity(market, info, projected_total, scenario, scores, p,
                 under_price,
                 pd_edge,
                 market_reaction_scenario_label("PITCHING_DOMINANCE_UNDER"),
+                force_action="STRIKE",
+                profile_override="PITCHING_DOMINANCE_UNDER",
             )
 
     # Predictive market move WATCH: pressure building before market fully moves.
