@@ -13,8 +13,8 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V3.10.0
-ROLLING DASHBOARDS + FEATURE LEARNING
+SHIFT MLB V3.10.1
+V4 FOUNDATION DATABASE INTEGRITY PATCH
 
 Current Production Version
 
@@ -54,10 +54,10 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # SHIFT deployment identity / anti-confusion banner
 # ---------------------------------------------------------------------------
-APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.10.0")
-APP_MODE = "ROLLING DASHBOARDS + FEATURE LEARNING"
+APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.10.1")
+APP_MODE = "V4 FOUNDATION DATABASE INTEGRITY PATCH"
 APP_BUILD_LABEL = f"SHIFT MLB {APP_VERSION} {APP_MODE}"
-DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-rolling-dashboards-feature-learning")
+DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-v4-foundation-database-integrity")
 RUN_EMAIL_TEST_ON_START = os.getenv("RUN_EMAIL_TEST_ON_START", "false").lower() == "true"
 
 TZ = ZoneInfo("America/Phoenix")
@@ -3186,7 +3186,7 @@ def profile_research_summary_lines(report_date=None):
 
 def strike_fieldnames():
     return [
-        "strike_id", "timestamp", "date", "game_key", "game_pk", "game",
+        "opportunity_id", "strike_id", "timestamp", "date", "game_key", "game_pk", "game",
         "side", "line", "price",
         "opening_total", "live_total", "projected_total", "edge", "edge_grade",
         "inning", "inning_state", "outs", "score", "base_out",
@@ -4492,6 +4492,7 @@ def log_strike_history(info, opportunity, market_context=None):
     )
 
     row = {
+        "opportunity_id": v4_opportunity_id(info, opportunity, "BET_NOW"),
         "strike_id": strike_id,
         "timestamp": now_local().isoformat(),
         "date": today(),
@@ -9886,6 +9887,318 @@ def generate_daily_learning_report(report_date=None):
             lines.append(al)
         return "\n".join(lines)
     return text
+
+
+
+# ---------------------------------------------------------------------------
+# V3.10.1 / V4 Foundation Database Integrity Patch
+# ---------------------------------------------------------------------------
+# This patch does not change the betting model. It upgrades the research database
+# so every opportunity can be linked, graded, compared, and learned from.
+
+ENABLE_V4_FOUNDATION = os.getenv("ENABLE_V4_FOUNDATION", "true").lower() == "true"
+ENABLE_OPPORTUNITY_ID = os.getenv("ENABLE_OPPORTUNITY_ID", "true").lower() == "true"
+ENABLE_EDGE_PERSISTENCE = os.getenv("ENABLE_EDGE_PERSISTENCE", "true").lower() == "true"
+ENABLE_REGRET_ANALYSIS = os.getenv("ENABLE_REGRET_ANALYSIS", "true").lower() == "true"
+ENABLE_OPPORTUNITY_RANKING = os.getenv("ENABLE_OPPORTUNITY_RANKING", "true").lower() == "true"
+ENABLE_FAIR_PRICE_FIELDS = os.getenv("ENABLE_FAIR_PRICE_FIELDS", "true").lower() == "true"
+ENABLE_MARKET_MEMORY_FIELDS = os.getenv("ENABLE_MARKET_MEMORY_FIELDS", "true").lower() == "true"
+
+
+def v4_profile(info=None, opportunity=None):
+    opportunity = opportunity or {}
+    scores = opportunity.get("scores", {}) or {}
+    return market_reaction_profile_from_scores(scores, opportunity.get("scenario")) or opportunity.get("profile") or "UNCLASSIFIED"
+
+
+def v4_opportunity_id(info, opportunity=None, action=""):
+    """
+    Universal research key shared by decision rows, strike rows, actual-entry rows,
+    and CLV snapshots. It intentionally excludes reject_reason so the same market
+    opportunity can be connected across decision/strike/grading tables.
+    """
+    if not ENABLE_OPPORTUNITY_ID:
+        return ""
+    info = info or {}
+    opportunity = opportunity or {}
+    profile = v4_profile(info, opportunity)
+    side = str(opportunity.get("side") or "NONE").upper()
+    line = str(opportunity.get("line") or opportunity.get("recommended_total") or "")
+    inning = str(safe_int(info.get("inning"), 0))
+    half = str(info.get("inning_state") or "")[:1].upper()
+    outs = str(safe_int(info.get("outs"), 0))
+    game_id = str(info.get("game_pk") or game_key_from_info(info) or decision_game_label(info))
+    # Keep this readable for Google Sheets filtering.
+    return "|".join([today(), game_id, profile, side, line, inning, half, outs])
+
+
+def v4_probability_fields(opportunity, row):
+    opportunity = opportunity or {}
+    row = row or {}
+    model_prob = safe_float(opportunity.get("model_probability"), None)
+    be_prob = safe_float(opportunity.get("break_even_probability"), None)
+    ev = safe_float(opportunity.get("expected_value"), None)
+    edge = safe_float(row.get("edge"), safe_float(opportunity.get("edge"), 0))
+    price = safe_int(row.get("price") or opportunity.get("recommended_price") or opportunity.get("price"), 0)
+    if model_prob is None and edge:
+        # Existing V3.2 approximation: projected run edge -> probability lift.
+        model_prob = round(clamp(50 + (edge * RUN_EDGE_TO_PROB_PER_RUN * 100), 1, 99) / 100, 4)
+    if be_prob is None and price:
+        be_prob = round(implied_probability_from_american(price), 4)
+    if ev is None and model_prob is not None and be_prob is not None:
+        ev = round(model_prob - be_prob, 4)
+    return model_prob, be_prob, ev
+
+
+def fair_price_from_probability(prob):
+    p = safe_float(prob, None)
+    if p is None or p <= 0 or p >= 1:
+        return ""
+    if p >= 0.5:
+        return int(round(-100 * p / (1 - p)))
+    return int(round(100 * (1 - p) / p))
+
+
+def fair_total_from_projection(projection):
+    proj = safe_float(projection, None)
+    if proj is None:
+        return ""
+    return round(proj * 2) / 2
+
+
+_v310_decision_log_fieldnames = decision_log_fieldnames
+
+
+def decision_log_fieldnames():
+    fields = list(_v310_decision_log_fieldnames())
+    additions = [
+        # Linkage / identity
+        "opportunity_id", "parent_decision_id", "linked_strike_id", "source_bot_version", "source_app_mode",
+        # Board/ranking shell for V4
+        "board_rank", "opportunity_score", "top_5_flag", "best_available_market",
+        # Fair price / probability
+        "fair_total", "fair_price", "fair_probability", "model_probability", "break_even_probability",
+        "ev_edge", "probability_source",
+        # Edge persistence / market memory
+        "edge_first_seen", "edge_last_seen", "edge_duration_seconds", "max_edge_seen",
+        "opening_to_alert_move", "alert_to_close_move", "best_clv_seen", "worst_clv_seen",
+        "beat_market", "market_memory_match", "market_memory_sample", "market_memory_roi", "market_memory_avg_clv",
+        # Regret / rejected opportunity audit
+        "regret_flag", "would_have_result", "would_have_units", "missed_value_reason",
+        # Actual user execution
+        "actual_bet_placed", "actual_entry_line", "actual_entry_price", "actual_entry_book",
+        "actual_entry_time", "actual_wager_units", "actual_result",
+    ]
+    for f in additions:
+        if f not in fields:
+            fields.append(f)
+    return fields
+
+
+_v310_decision_row_from_opportunity = decision_row_from_opportunity
+
+
+def decision_row_from_opportunity(info, market_context, opportunity, action, decision_type="", reject_reason=""):
+    row = _v310_decision_row_from_opportunity(info, market_context, opportunity, action, decision_type, reject_reason)
+    if not ENABLE_V4_FOUNDATION:
+        return row
+    info = info or {}
+    market_context = market_context or {}
+    opportunity = opportunity or {}
+    model_prob, be_prob, ev = v4_probability_fields(opportunity, row)
+    fair_price = fair_price_from_probability(model_prob)
+    projected = row.get("projected_total") or opportunity.get("projected_total") or opportunity.get("projection")
+    live_total = safe_float(row.get("live_total"), safe_float(market_context.get("live_total"), None))
+    opening_total = safe_float(row.get("opening_total"), safe_float(market_context.get("opening_total"), None))
+    line = safe_float(row.get("line"), safe_float(opportunity.get("recommended_total"), None))
+    edge = safe_float(row.get("edge"), 0)
+    move_to_alert = ""
+    if live_total is not None and opening_total is not None:
+        move_to_alert = round(live_total - opening_total, 1)
+    row.update({
+        "opportunity_id": v4_opportunity_id(info, opportunity, action),
+        "parent_decision_id": row.get("decision_id", ""),
+        "source_bot_version": APP_VERSION,
+        "source_app_mode": APP_MODE,
+        "board_rank": opportunity.get("board_rank", ""),
+        "opportunity_score": opportunity.get("opportunity_score", row.get("confidence", "")),
+        "top_5_flag": opportunity.get("top_5_flag", ""),
+        "best_available_market": opportunity.get("best_available_market", "totals"),
+        "fair_total": opportunity.get("fair_total", fair_total_from_projection(projected)),
+        "fair_price": opportunity.get("fair_price", fair_price),
+        "fair_probability": opportunity.get("fair_probability", model_prob),
+        "model_probability": model_prob,
+        "break_even_probability": be_prob,
+        "ev_edge": ev,
+        "probability_source": opportunity.get("probability_source", "v4_formula" if model_prob is not None else ""),
+        "edge_first_seen": row.get("timestamp"),
+        "edge_last_seen": row.get("timestamp"),
+        "edge_duration_seconds": 0,
+        "max_edge_seen": edge,
+        "opening_to_alert_move": move_to_alert,
+        "alert_to_close_move": "",
+        "best_clv_seen": row.get("clv", ""),
+        "worst_clv_seen": row.get("clv", ""),
+        "beat_market": "",
+        "market_memory_match": "",
+        "market_memory_sample": "",
+        "market_memory_roi": "",
+        "market_memory_avg_clv": "",
+        "regret_flag": "YES" if action == "NO_BET" else "",
+        "would_have_result": "",
+        "would_have_units": "",
+        "missed_value_reason": reject_reason if action == "NO_BET" else "",
+        "actual_bet_placed": "",
+        "actual_entry_line": "",
+        "actual_entry_price": "",
+        "actual_entry_book": "",
+        "actual_entry_time": "",
+        "actual_wager_units": "",
+        "actual_result": "",
+    })
+    # If line is missing, preserve blanks rather than inventing.
+    if line is None:
+        row["fair_total"] = row.get("fair_total") or ""
+    return row
+
+
+_v310_update_decision_log_clv_snapshots = update_decision_log_clv_snapshots
+
+
+def update_decision_log_clv_snapshots(info, live_total):
+    _v310_update_decision_log_clv_snapshots(info, live_total)
+    if not (ENABLE_V4_FOUNDATION and ENABLE_EDGE_PERSISTENCE and ENABLE_DECISION_LOG):
+        return
+    current_line = safe_float(live_total, None)
+    if current_line is None:
+        return
+    rows = csv_read_rows(DECISION_LOG_FILE)
+    if not rows:
+        return
+    info = info or {}
+    now_iso = now_local().isoformat()
+    changed = False
+    for row in rows:
+        if row.get("date") != today():
+            continue
+        if row.get("result") in ["WIN", "LOSS", "PUSH"]:
+            continue
+        same_game = row.get("game_pk") == str(info.get("game_pk")) or row.get("game") == f"{info.get('away')} at {info.get('home')}"
+        if not same_game:
+            continue
+        side = str(row.get("side", "")).upper()
+        alert_line = safe_float(row.get("line"), None)
+        if side not in ["OVER", "UNDER"] or alert_line is None:
+            continue
+        clv = round(current_line - alert_line, 1) if side == "OVER" else round(alert_line - current_line, 1)
+        first_seen = row.get("edge_first_seen") or row.get("timestamp") or now_iso
+        try:
+            start_dt = datetime.fromisoformat(str(first_seen))
+            duration = max(0, int((now_local() - start_dt).total_seconds()))
+        except Exception:
+            duration = safe_int(row.get("edge_duration_seconds"), 0)
+        old_best = safe_float(row.get("best_clv_seen"), None)
+        old_worst = safe_float(row.get("worst_clv_seen"), None)
+        row["edge_last_seen"] = now_iso
+        row["edge_duration_seconds"] = duration
+        row["alert_to_close_move"] = clv
+        row["best_clv_seen"] = clv if old_best is None else max(old_best, clv)
+        row["worst_clv_seen"] = clv if old_worst is None else min(old_worst, clv)
+        row["beat_market"] = "TRUE" if clv > 0 else "FALSE"
+        max_edge = safe_float(row.get("max_edge_seen"), None)
+        current_edge = safe_float(row.get("edge"), None)
+        if current_edge is not None:
+            row["max_edge_seen"] = current_edge if max_edge is None else max(max_edge, current_edge)
+        changed = True
+    if changed:
+        csv_write_rows(DECISION_LOG_FILE, decision_log_fieldnames(), rows)
+
+
+_v310_grade_completed_decision_log = grade_completed_decision_log
+
+
+def grade_completed_decision_log(game_pk, label, final_score):
+    """Grade every decision row and add V4 regret/would-have fields."""
+    _v310_grade_completed_decision_log(game_pk, label, final_score)
+    if not (ENABLE_V4_FOUNDATION and ENABLE_DECISION_LOG):
+        return
+    final_total = final_total_from_score(final_score)
+    if final_total is None:
+        return
+    rows = csv_read_rows(DECISION_LOG_FILE)
+    if not rows:
+        return
+    changed = False
+    for row in rows:
+        same_game = (
+            str(row.get("game_pk")) == str(game_pk)
+            or row.get("game") == label
+            or row.get("game_key") == f"{today()}::{label}"
+        )
+        if not same_game:
+            continue
+        side = str(row.get("side", "")).upper()
+        line = safe_float(row.get("line"), None)
+        if side not in ["OVER", "UNDER"] or line is None:
+            continue
+        result = grade_bet(side, line, final_total)
+        units = american_odds_profit_units(row.get("price"), result)
+        # Make sure even old rows get completed.
+        row["final_score"] = final_score
+        row["final_total"] = final_total
+        row["result"] = row.get("result") if row.get("result") in ["WIN", "LOSS", "PUSH"] else result
+        row["units"] = row.get("units") if str(row.get("units", "")).strip() else units
+        row["graded_at"] = row.get("graded_at") or now_local().isoformat()
+        if row.get("action") == "NO_BET":
+            row["regret_flag"] = "YES"
+            row["would_have_result"] = result
+            row["would_have_units"] = units
+        else:
+            row["actual_result"] = result if row.get("actual_bet_placed") else row.get("actual_result", "")
+        clv = safe_float(row.get("clv"), None)
+        if clv is not None:
+            row["beat_market"] = "TRUE" if clv > 0 else "FALSE"
+            row["best_clv_seen"] = row.get("best_clv_seen") or clv
+            row["worst_clv_seen"] = row.get("worst_clv_seen") or clv
+        changed = True
+    if changed:
+        csv_write_rows(DECISION_LOG_FILE, decision_log_fieldnames(), rows)
+        build_adaptive_config_from_results()
+        print(f"V4 DECISION DATABASE GRADED | {label} | Final {final_score}")
+
+
+# Expand actual entry sheet for real BetMGM execution tracking while preserving old templates.
+_v310_actual_entry_fieldnames = actual_entry_fieldnames if 'actual_entry_fieldnames' in globals() else None
+
+
+def actual_entry_fieldnames():
+    base = _v310_actual_entry_fieldnames() if _v310_actual_entry_fieldnames else []
+    if not base:
+        base = ["strike_id", "date", "game", "side", "line", "price", "book"]
+    for f in [
+        "opportunity_id", "did_bet", "actual_entry_line", "actual_entry_price", "actual_entry_book",
+        "actual_entry_time", "actual_wager_units", "notes"
+    ]:
+        if f not in base:
+            base.append(f)
+    return base
+
+
+_v310_actual_entry_template_from_strike = actual_entry_template_from_strike if 'actual_entry_template_from_strike' in globals() else None
+
+
+def actual_entry_template_from_strike(row):
+    base = _v310_actual_entry_template_from_strike(row) if _v310_actual_entry_template_from_strike else dict(row or {})
+    base = dict(base or {})
+    base.setdefault("opportunity_id", (row or {}).get("opportunity_id", ""))
+    base.setdefault("did_bet", "")
+    base.setdefault("actual_entry_line", "")
+    base.setdefault("actual_entry_price", "")
+    base.setdefault("actual_entry_book", "")
+    base.setdefault("actual_entry_time", "")
+    base.setdefault("actual_wager_units", "")
+    base.setdefault("notes", "")
+    return base
 
 
 
