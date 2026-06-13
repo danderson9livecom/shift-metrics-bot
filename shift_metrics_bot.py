@@ -13,8 +13,8 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V3.10.1
-V4 FOUNDATION DATABASE INTEGRITY PATCH
+SHIFT MLB V3.10.2
+V4 MARKET EXPECTATION DATA PATCH
 
 Current Production Version
 
@@ -54,10 +54,10 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # SHIFT deployment identity / anti-confusion banner
 # ---------------------------------------------------------------------------
-APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.10.1")
-APP_MODE = "V4 FOUNDATION DATABASE INTEGRITY PATCH"
+APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.10.2")
+APP_MODE = "V4 MARKET EXPECTATION DATA PATCH"
 APP_BUILD_LABEL = f"SHIFT MLB {APP_VERSION} {APP_MODE}"
-DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-v4-foundation-database-integrity")
+DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-v4-market-expectation-data")
 RUN_EMAIL_TEST_ON_START = os.getenv("RUN_EMAIL_TEST_ON_START", "false").lower() == "true"
 
 TZ = ZoneInfo("America/Phoenix")
@@ -1078,6 +1078,171 @@ def market_reaction_scenario_label(profile):
     return labels.get(profile, "Market Reaction Evaluation")
 
 
+
+
+# ---------------------------------------------------------------------------
+# V3.10.2 Market Expectation vs Reality instrumentation
+# ---------------------------------------------------------------------------
+# These are research-only fields. They do NOT change alert logic, thresholds,
+# profile promotion, risk tiers, units, or SMS behavior.
+#
+# Goal:
+#   For every evaluation, capture what the live market implied would happen
+#   from that point forward, then compare it with what actually happened.
+#   This is the foundation for the Market Memory / market inefficiency model.
+
+def score_total_from_text(score):
+    """Return total runs from a score string like '4-2'. Safe fallback for grading."""
+    try:
+        parts = str(score or "").replace(" ", "").split("-")
+        if len(parts) != 2:
+            return None
+        return int(parts[0]) + int(parts[1])
+    except Exception:
+        return None
+
+
+def evaluation_total_runs(info=None, row=None):
+    """Runs already scored at the time of the evaluation."""
+    if isinstance(info, dict):
+        if info.get("total_runs") is not None:
+            return safe_int(info.get("total_runs"), 0)
+        away = safe_int(info.get("away_runs"), 0)
+        home = safe_int(info.get("home_runs"), 0)
+        return away + home
+    if isinstance(row, dict):
+        parsed = score_total_from_text(row.get("score"))
+        if parsed is not None:
+            return parsed
+    return 0
+
+
+def market_implied_remaining_runs_value(live_total, runs_at_evaluation):
+    """
+    What the market is implying will be scored after this evaluation.
+    Example: live total 12.5, current score 4-2 = 6 runs already scored,
+    market implies 6.5 more runs.
+    """
+    live = safe_float(live_total, None)
+    runs = safe_float(runs_at_evaluation, None)
+    if live is None or runs is None:
+        return ""
+    return round(live - runs, 2)
+
+
+def market_move_bucket(move):
+    move = safe_float(move, 0)
+    if move >= 4:
+        return "UP4_PLUS"
+    if move >= 3:
+        return "UP3"
+    if move >= 2:
+        return "UP2"
+    if move >= 1:
+        return "UP1"
+    if move <= -4:
+        return "DOWN4_PLUS"
+    if move <= -3:
+        return "DOWN3"
+    if move <= -2:
+        return "DOWN2"
+    if move <= -1:
+        return "DOWN1"
+    return "FLAT"
+
+
+def inning_bucket_label(inning):
+    inn = safe_int(inning, 0)
+    if inn <= 0:
+        return "PRE_OR_UNKNOWN"
+    if inn <= 3:
+        return "EARLY_1_3"
+    if inn <= 6:
+        return "MID_4_6"
+    return "LATE_7_PLUS"
+
+
+def score_bucket(value):
+    v = safe_float(value, 0)
+    if v >= 85:
+        return "85_PLUS"
+    if v >= 70:
+        return "70_84"
+    if v >= 55:
+        return "55_69"
+    if v >= 40:
+        return "40_54"
+    return "UNDER_40"
+
+
+def market_state_id_from_context(info, market_context, opportunity, scores):
+    """
+    Compact repeatable state label for later grouping:
+    inning bucket + market move + profile + P2R bucket + traffic bucket +
+    market confirmation bucket.
+    """
+    info = info or {}
+    market_context = market_context or {}
+    opportunity = opportunity or {}
+    scores = scores or {}
+
+    profile = market_reaction_profile_from_scores(scores, opportunity.get("scenario"))
+    move = scores.get("market_reaction_move")
+    if move in [None, ""]:
+        move, _ref = market_reaction_move(
+            market_context.get("opening_total"),
+            market_context.get("first_seen_total"),
+            market_context.get("live_total", opportunity.get("line")),
+        )
+    market_conf = market_context.get("market_confirmation_score", opportunity.get("market_confirmation_score"))
+
+    return "|".join([
+        inning_bucket_label(info.get("inning")),
+        market_move_bucket(move),
+        str(profile or "UNCLASSIFIED"),
+        "P2R_" + score_bucket(scores.get("pressure_to_runs")),
+        "TRAFFIC_" + score_bucket(scores.get("traffic_conversion")),
+        "MKTCONF_" + score_bucket(market_conf),
+    ])
+
+
+def enrich_market_expectation_fields(row, info=None, market_context=None, opportunity=None, scores=None):
+    """
+    Add the four research fields to any decision/export row:
+      - market_state_id
+      - market_implied_remaining_runs
+      - actual_remaining_runs
+      - market_vs_reality_gap
+    """
+    row = dict(row or {})
+    info = info or {}
+    market_context = market_context or {}
+    opportunity = opportunity or {}
+    scores = scores or {}
+
+    if not row.get("market_state_id"):
+        row["market_state_id"] = market_state_id_from_context(info, market_context, opportunity, scores)
+
+    runs_at_eval = evaluation_total_runs(info=info) if info else evaluation_total_runs(row=row)
+    implied = market_implied_remaining_runs_value(row.get("live_total") or market_context.get("live_total"), runs_at_eval)
+    if row.get("market_implied_remaining_runs") in [None, ""]:
+        row["market_implied_remaining_runs"] = implied
+
+    final_total = safe_float(row.get("final_total"), None)
+    if final_total is not None:
+        actual_remaining = round(final_total - safe_float(runs_at_eval, 0), 2)
+        row["actual_remaining_runs"] = actual_remaining
+        implied_float = safe_float(row.get("market_implied_remaining_runs"), None)
+        if implied_float is not None:
+            row["market_vs_reality_gap"] = round(implied_float - actual_remaining, 2)
+    else:
+        row.setdefault("actual_remaining_runs", "")
+        row.setdefault("market_vs_reality_gap", "")
+
+    return row
+
+
+
 def pitching_dominance_under_scores(info, opening_total, first_seen_total, live_total, scores, p, q, traffic):
     """
     V3.7.2 fifth profile: early true suppression.
@@ -1920,6 +2085,7 @@ def decision_log_fieldnames():
         "profile", "scenario", "side", "line", "price", "book",
         "opening_total", "first_seen_total", "true_opening_total", "live_total",
         "projected_total", "edge", "confidence", "expected_value",
+        "market_state_id", "market_implied_remaining_runs", "actual_remaining_runs", "market_vs_reality_gap",
         "inning", "inning_state", "outs", "score", "base_out",
         "projection_score", "confirmation_score", "market_confirmation_score",
         "market_value_score", "risk_filter_score", "calculated_risk_tier", "suggested_unit",
@@ -2079,6 +2245,7 @@ def decision_row_from_opportunity(info, market_context, opportunity, action, dec
         "clv": "",
         "graded_at": "",
     }
+    row = enrich_market_expectation_fields(row, info=info, market_context=market_context, opportunity=opportunity, scores=scores)
     row["pattern_tags"] = "|".join(pattern_tags_from_row({
         **row,
         "p2r": row.get("pressure_to_runs"),
@@ -2260,6 +2427,7 @@ def grade_completed_decision_log(game_pk, label, final_score):
         row["final_total"] = final_total
         row["result"] = result
         row["units"] = american_odds_profit_units(row.get("price"), result)
+        row = enrich_market_expectation_fields(row)
         close_line = safe_float(row.get("live_total"), None)
         # If no later close snapshot is available, leave CLV blank. Poll snapshots can enrich this later.
         if row.get("clv") in [None, ""]:
@@ -9453,6 +9621,7 @@ def decision_log_fieldnames():
         "profile", "scenario", "side", "line", "price", "book",
         "opening_total", "first_seen_total", "true_opening_total", "live_total",
         "projected_total", "edge", "confidence", "expected_value",
+        "market_state_id", "market_implied_remaining_runs", "actual_remaining_runs", "market_vs_reality_gap",
         "inning", "inning_state", "outs", "score", "base_out",
         "projection_score", "confirmation_score", "market_confirmation_score",
         "market_value_score", "risk_filter_score", "calculated_risk_tier", "suggested_unit",
@@ -10235,6 +10404,7 @@ CORE_VARIABLES_FOR_AUDIT = [
     "bullpen_lockdown", "continuation_score", "discounted_over_score",
     "false_inflation_score", "continuation_exhaustion_score",
     "pitching_dominance_under_score", "market_reaction_move", "market_discount",
+    "market_implied_remaining_runs", "actual_remaining_runs", "market_vs_reality_gap",
 ]
 
 
@@ -10370,6 +10540,10 @@ def _decision_event_base(row, report_date=None, export_type=""):
         "edge": row.get("edge"),
         "expected_value": row.get("expected_value"),
         "confidence": row.get("confidence"),
+        "market_state_id": row.get("market_state_id"),
+        "market_implied_remaining_runs": row.get("market_implied_remaining_runs"),
+        "actual_remaining_runs": row.get("actual_remaining_runs"),
+        "market_vs_reality_gap": row.get("market_vs_reality_gap"),
         "market_confirmation_score": row.get("market_confirmation_score"),
         "market_value_score": row.get("market_value_score"),
         "risk_filter_score": row.get("risk_filter_score"),
@@ -10526,6 +10700,9 @@ def _send_feature_learning_export(report_date):
         tags = [t for t in str(r.get("pattern_tags") or "").split("|") if t]
         for tag in tags:
             buckets.setdefault("TAG:" + tag, []).append(r)
+        state_id = str(r.get("market_state_id") or "").strip()
+        if state_id:
+            buckets.setdefault("MARKET_STATE:" + state_id, []).append(r)
         for var in CORE_VARIABLES_FOR_AUDIT:
             val = safe_float(r.get(var), None)
             if val is None:
