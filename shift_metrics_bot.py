@@ -2113,6 +2113,10 @@ def log_shift_decision(state_game, info, market_context, opportunity, action=Non
         return
     csv_append_once(DECISION_LOG_FILE, decision_log_fieldnames(), row)
     post_tracking_event("shift_decision", row)
+    try:
+        post_existing_tab_decision_exports(row)
+    except Exception as e:
+        print("IMPORTANT TAB DECISION EXPORT ERROR:", repr(e))
     print(f"DECISION LOG | {action} | {row.get('game')} | {row.get('side')} {row.get('line')} | {row.get('profile')} | {reject_reason or decision_type}")
 
 
@@ -4134,6 +4138,7 @@ def grade_completed_strikes(game_pk, label, final_score):
         ]
         for row in newly_graded:
             post_tracking_event("strike_graded", row)
+            post_tracking_event("graded_result", row)
             send_graded_result_text(build_graded_result_message(row, todays_rows))
 
 def time_remaining_multiplier(info):
@@ -4600,6 +4605,7 @@ def log_strike_history(info, opportunity, market_context=None):
     actual_template = actual_entry_template_from_strike(row)
     if actual_template:
         csv_append_once(ACTUAL_ENTRY_FILE, actual_entry_fieldnames(), actual_template)
+        post_tracking_event("actual_entries", actual_template)
     post_tracking_event("strike_stored", row)
     print(f"SELF-LEARNING STORED STRIKE | {row['game']} | {row['side']} {row['line']} | {row['pattern_tags']}")
 
@@ -10199,6 +10205,452 @@ def actual_entry_template_from_strike(row):
     base.setdefault("actual_wager_units", "")
     base.setdefault("notes", "")
     return base
+
+
+
+# ---------------------------------------------------------------------------
+# V3.10.2 EXISTING TABS IMPORTANT DATA EXPORT PATCH
+# ---------------------------------------------------------------------------
+# Purpose:
+# Your Google Sheet already has the correct tabs. This patch sends the important
+# business-process outputs to those EXISTING event_type tabs instead of creating
+# new tab names. It does not add API calls. It uses the CSV/database rows the bot
+# already creates, then mirrors analyst-ready summaries through TRACKING_WEBHOOK_URL.
+
+IMPORTANT_EXPORT_STATE_FILE = os.getenv("IMPORTANT_EXPORT_STATE_FILE", "important_data_export_state.json")
+ENABLE_EXISTING_TAB_IMPORTANT_EXPORTS = os.getenv("ENABLE_EXISTING_TAB_IMPORTANT_EXPORTS", "true").lower() == "true"
+ENABLE_OPPORTUNITY_RANKING = os.getenv("ENABLE_OPPORTUNITY_RANKING", "true").lower() == "true"
+ENABLE_EDGE_PERSISTENCE = os.getenv("ENABLE_EDGE_PERSISTENCE", "true").lower() == "true"
+ENABLE_REGRET_ANALYSIS = os.getenv("ENABLE_REGRET_ANALYSIS", "true").lower() == "true"
+ENABLE_PROFILE_SUMMARY_EXPORT = os.getenv("ENABLE_PROFILE_SUMMARY_EXPORT", "true").lower() == "true"
+ENABLE_ADAPTIVE_PROFILE_EXPORT = os.getenv("ENABLE_ADAPTIVE_PROFILE_EXPORT", "true").lower() == "true"
+ENABLE_FEATURE_LEARNING_EXPORT = os.getenv("ENABLE_FEATURE_LEARNING_EXPORT", "true").lower() == "true"
+IMPORTANT_EXPORT_TOP_N = int(os.getenv("IMPORTANT_EXPORT_TOP_N", "25"))
+
+CORE_VARIABLES_FOR_AUDIT = [
+    "market_confirmation_score", "market_value_score", "line_velocity",
+    "edge", "expected_value", "pressure_to_runs", "run_conversion",
+    "traffic_conversion", "pitcher_stress", "risk_filter_score",
+    "contact_quality", "bullpen_risk", "run_prevention", "strikeout_environment",
+    "bullpen_lockdown", "continuation_score", "discounted_over_score",
+    "false_inflation_score", "continuation_exhaustion_score",
+    "pitching_dominance_under_score", "market_reaction_move", "market_discount",
+]
+
+
+def important_export_enabled():
+    return bool(ENABLE_EXISTING_TAB_IMPORTANT_EXPORTS and tracking_webhook_enabled())
+
+
+def _important_state_load():
+    try:
+        if os.path.exists(IMPORTANT_EXPORT_STATE_FILE):
+            with open(IMPORTANT_EXPORT_STATE_FILE, "r") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print("IMPORTANT EXPORT STATE LOAD ERROR:", repr(e))
+    return {}
+
+
+def _important_state_save(data):
+    try:
+        with open(IMPORTANT_EXPORT_STATE_FILE, "w") as f:
+            json.dump(data or {}, f, indent=2)
+    except Exception as e:
+        print("IMPORTANT EXPORT STATE SAVE ERROR:", repr(e))
+
+
+def _row_result_and_units(row):
+    """Return the outcome for accepted bets OR would-have outcome for NO_BET rows."""
+    row = row or {}
+    action = str(row.get("action") or "").upper()
+    if action == "NO_BET":
+        result = row.get("would_have_result") or row.get("result")
+        units = row.get("would_have_units") if str(row.get("would_have_units", "")).strip() else row.get("units")
+    else:
+        result = row.get("result") or row.get("actual_result")
+        units = row.get("units")
+    result = str(result or "").upper()
+    if result not in ["WIN", "LOSS", "PUSH"]:
+        return "", None
+    return result, safe_float(units, 0)
+
+
+def _decision_rows_for_date(report_date=None, graded_only=False):
+    report_date = report_date or today()
+    rows = [r for r in csv_read_rows(DECISION_LOG_FILE) if r.get("date") == report_date]
+    if graded_only:
+        out = []
+        for r in rows:
+            res, _units = _row_result_and_units(r)
+            if res in ["WIN", "LOSS", "PUSH"]:
+                out.append(r)
+        return out
+    return rows
+
+
+def _summarize_outcome_rows(rows):
+    wins = losses = pushes = 0
+    units = 0.0
+    clvs = []
+    for r in rows or []:
+        res, u = _row_result_and_units(r)
+        if res == "WIN":
+            wins += 1
+        elif res == "LOSS":
+            losses += 1
+        elif res == "PUSH":
+            pushes += 1
+        else:
+            continue
+        units += safe_float(u, 0)
+        if str(r.get("clv", "")).strip() not in ["", "None"]:
+            clvs.append(safe_float(r.get("clv"), 0))
+    sample = wins + losses + pushes
+    win_pct = round((wins / max(1, wins + losses)) * 100, 1) if (wins + losses) else 0
+    roi = round(units / max(1, wins + losses), 4) if (wins + losses) else 0
+    avg_clv = round(avg(clvs), 2) if clvs else 0.0
+    return {
+        "sample": sample, "wins": wins, "losses": losses, "pushes": pushes,
+        "win_pct": win_pct, "units": round(units, 2), "roi": roi,
+        "avg_clv": avg_clv, "clv_sample": len(clvs),
+    }
+
+
+def _audit_verdict(sample, roi, avg_clv):
+    sample = safe_int(sample, 0)
+    roi = safe_float(roi, 0)
+    avg_clv = safe_float(avg_clv, 0)
+    if sample < 30:
+        return "BUILD_SAMPLE"
+    if roi >= 0.04 and avg_clv >= 0.20:
+        return "PROMOTE"
+    if roi <= -0.03 and avg_clv <= -0.20:
+        return "TIGHTEN_OR_REMOVE"
+    if roi > 0:
+        return "LEAN_KEEP"
+    if roi < 0:
+        return "LEAN_DOWNGRADE"
+    return "HOLD"
+
+
+def _short_reason(row):
+    reason = str((row or {}).get("reject_reason") or (row or {}).get("quality_reason") or "UNSPECIFIED")
+    return reason[:140]
+
+
+def _decision_event_base(row, report_date=None, export_type=""):
+    row = row or {}
+    result, units = _row_result_and_units(row)
+    return {
+        "date": report_date or row.get("date") or today(),
+        "export_type": export_type,
+        "decision_id": row.get("decision_id"),
+        "timestamp": row.get("timestamp"),
+        "game": row.get("game"),
+        "game_pk": row.get("game_pk"),
+        "action": row.get("action"),
+        "decision_type": row.get("decision_type"),
+        "reject_reason": row.get("reject_reason"),
+        "profile": row.get("profile") or row.get("market_reaction_profile"),
+        "scenario": row.get("scenario"),
+        "side": row.get("side"),
+        "line": row.get("line"),
+        "price": row.get("price"),
+        "book": row.get("book") or row.get("recommended_book"),
+        "inning": row.get("inning"),
+        "inning_state": row.get("inning_state"),
+        "outs": row.get("outs"),
+        "score": row.get("score"),
+        "base_out": row.get("base_out"),
+        "opening_total": row.get("opening_total"),
+        "live_total": row.get("live_total"),
+        "projected_total": row.get("projected_total"),
+        "edge": row.get("edge"),
+        "expected_value": row.get("expected_value"),
+        "confidence": row.get("confidence"),
+        "market_confirmation_score": row.get("market_confirmation_score"),
+        "market_value_score": row.get("market_value_score"),
+        "risk_filter_score": row.get("risk_filter_score"),
+        "line_velocity": row.get("line_velocity"),
+        "line_direction": row.get("line_direction"),
+        "market_disagreement": row.get("market_disagreement"),
+        "recommended_book": row.get("recommended_book"),
+        "recommended_total": row.get("recommended_total"),
+        "recommended_price": row.get("recommended_price"),
+        "best_line_age_seconds": row.get("best_line_age_seconds"),
+        "calculated_risk_tier": row.get("calculated_risk_tier"),
+        "suggested_unit": row.get("suggested_unit"),
+        "pattern_tags": row.get("pattern_tags"),
+        "bet_quality": row.get("bet_quality"),
+        "quality_reason": row.get("quality_reason"),
+        "final_score": row.get("final_score"),
+        "final_total": row.get("final_total"),
+        "result": result or row.get("result"),
+        "units": units if units is not None else row.get("units"),
+        "clv": row.get("clv"),
+        "would_have_result": row.get("would_have_result"),
+        "would_have_units": row.get("would_have_units"),
+        "updated_at": now_local().isoformat(),
+    }
+
+
+def _opportunity_score(row):
+    edge = abs(safe_float(row.get("edge"), 0))
+    ev = max(0, safe_float(row.get("expected_value"), 0))
+    conf = safe_float(row.get("confidence"), 0)
+    mkt = safe_float(row.get("market_confirmation_score"), 0)
+    value = safe_float(row.get("market_value_score"), 0)
+    risk = safe_float(row.get("risk_filter_score"), 50)
+    clv = safe_float(row.get("clv"), 0)
+    return round(edge * 8 + ev * 40 + conf * 0.22 + mkt * 0.18 + value * 0.20 - risk * 0.15 + clv * 2, 2)
+
+
+def post_existing_tab_decision_exports(row):
+    """Real-time mirrors for the existing opportunity/edge tabs, called when shift_decision logs."""
+    if not important_export_enabled() or not row:
+        return
+    if ENABLE_OPPORTUNITY_RANKING:
+        opp = _decision_event_base(row, row.get("date"), "real_time_decision")
+        opp["opportunity_score"] = _opportunity_score(row)
+        opp["board_rank"] = ""
+        opp["top_5_flag"] = ""
+        post_tracking_event("opportunity_ranking", opp)
+    if ENABLE_EDGE_PERSISTENCE:
+        edge = _decision_event_base(row, row.get("date"), "real_time_edge")
+        edge.update({
+            "edge_first_seen": row.get("edge_first_seen") or row.get("timestamp"),
+            "edge_last_seen": row.get("edge_last_seen") or row.get("timestamp"),
+            "edge_duration_seconds": row.get("edge_duration_seconds") or "",
+            "max_edge_seen": row.get("max_edge_seen") or row.get("edge"),
+            "opening_to_alert_move": row.get("market_reaction_move"),
+            "alert_to_close_move": row.get("clv"),
+            "best_clv_seen": row.get("best_clv_seen") or row.get("clv"),
+            "worst_clv_seen": row.get("worst_clv_seen") or row.get("clv"),
+            "beat_market": row.get("beat_market"),
+        })
+        post_tracking_event("edge_persistence", edge)
+
+
+def _send_opportunity_ranking_export(report_date):
+    if not ENABLE_OPPORTUNITY_RANKING:
+        return 0
+    rows = _decision_rows_for_date(report_date, graded_only=False)
+    ranked = sorted(rows, key=_opportunity_score, reverse=True)[:IMPORTANT_EXPORT_TOP_N]
+    sent = 0
+    for rank, r in enumerate(ranked, start=1):
+        payload = _decision_event_base(r, report_date, "nightly_top_opportunity")
+        payload["board_rank"] = rank
+        payload["opportunity_score"] = _opportunity_score(r)
+        payload["top_5_flag"] = "TRUE" if rank <= 5 else "FALSE"
+        post_tracking_event("opportunity_ranking", payload)
+        sent += 1
+    return sent
+
+
+def _send_edge_persistence_export(report_date):
+    if not ENABLE_EDGE_PERSISTENCE:
+        return 0
+    rows = _decision_rows_for_date(report_date, graded_only=False)
+    rows = sorted(rows, key=lambda r: abs(safe_float(r.get("edge"), 0)), reverse=True)[:IMPORTANT_EXPORT_TOP_N]
+    sent = 0
+    for r in rows:
+        payload = _decision_event_base(r, report_date, "nightly_edge_persistence")
+        payload.update({
+            "edge_first_seen": r.get("edge_first_seen") or r.get("timestamp"),
+            "edge_last_seen": r.get("edge_last_seen") or r.get("graded_at") or r.get("timestamp"),
+            "edge_duration_seconds": r.get("edge_duration_seconds") or "",
+            "max_edge_seen": r.get("max_edge_seen") or r.get("edge"),
+            "opening_to_alert_move": r.get("market_reaction_move"),
+            "alert_to_close_move": r.get("clv"),
+            "best_clv_seen": r.get("best_clv_seen") or r.get("clv"),
+            "worst_clv_seen": r.get("worst_clv_seen") or r.get("clv"),
+            "beat_market": r.get("beat_market"),
+        })
+        post_tracking_event("edge_persistence", payload)
+        sent += 1
+    return sent
+
+
+def _send_regret_analysis_export(report_date):
+    if not ENABLE_REGRET_ANALYSIS:
+        return 0
+    rows = _decision_rows_for_date(report_date, graded_only=True)
+    no_bets = [r for r in rows if str(r.get("action") or "").upper() == "NO_BET"]
+    sent = 0
+
+    # Filter audit: which rejection reasons saved or cost money.
+    buckets = {}
+    for r in no_bets:
+        key = _short_reason(r)
+        buckets.setdefault(key, []).append(r)
+    for reason, bucket in sorted(buckets.items(), key=lambda kv: abs(_summarize_outcome_rows(kv[1])["units"]), reverse=True)[:IMPORTANT_EXPORT_TOP_N]:
+        s = _summarize_outcome_rows(bucket)
+        payload = {
+            "date": report_date,
+            "export_type": "filter_summary",
+            "reject_reason": reason,
+            **s,
+            "verdict": "GOOD_FILTER" if s["units"] < 0 else "COSTLY_FILTER" if s["units"] > 0 else "NEUTRAL_FILTER",
+            "updated_at": now_local().isoformat(),
+        }
+        post_tracking_event("regret_analysis", payload)
+        sent += 1
+
+    # Top missed winners and top rejected losers.
+    sorted_regret = sorted(no_bets, key=lambda r: safe_float(r.get("would_have_units") or r.get("units"), 0), reverse=True)
+    candidates = sorted_regret[:10] + list(reversed(sorted_regret[-10:]))
+    seen = set()
+    for r in candidates:
+        did = r.get("decision_id") or json.dumps(r, sort_keys=True)[:120]
+        if did in seen:
+            continue
+        seen.add(did)
+        payload = _decision_event_base(r, report_date, "missed_or_saved_opportunity")
+        wh_units = safe_float(r.get("would_have_units") or r.get("units"), 0)
+        payload["regret_flag"] = "YES" if wh_units > 0 else "SAVED_BY_FILTER" if wh_units < 0 else "NEUTRAL"
+        payload["missed_value_reason"] = _short_reason(r)
+        payload["would_have_units"] = wh_units
+        post_tracking_event("regret_analysis", payload)
+        sent += 1
+    return sent
+
+
+def _send_feature_learning_export(report_date):
+    if not ENABLE_FEATURE_LEARNING_EXPORT:
+        return 0
+    rows = _decision_rows_for_date(report_date, graded_only=True)
+    buckets = {}
+    for r in rows:
+        tags = [t for t in str(r.get("pattern_tags") or "").split("|") if t]
+        for tag in tags:
+            buckets.setdefault("TAG:" + tag, []).append(r)
+        for var in CORE_VARIABLES_FOR_AUDIT:
+            val = safe_float(r.get(var), None)
+            if val is None:
+                continue
+            if var in ["edge", "expected_value", "line_velocity", "market_reaction_move", "market_discount"]:
+                if abs(val) >= 3:
+                    bucket = "HIGH_ABS"
+                elif abs(val) >= 1:
+                    bucket = "MID_ABS"
+                else:
+                    bucket = "LOW_ABS"
+            else:
+                if val >= 85:
+                    bucket = "85_PLUS"
+                elif val >= 70:
+                    bucket = "70_84"
+                elif val >= 55:
+                    bucket = "55_69"
+                else:
+                    bucket = "UNDER_55"
+            buckets.setdefault(f"{var}:{bucket}", []).append(r)
+    sent = 0
+    for feature_key, bucket_rows in sorted(buckets.items(), key=lambda kv: len(kv[1]), reverse=True)[:IMPORTANT_EXPORT_TOP_N * 2]:
+        s = _summarize_outcome_rows(bucket_rows)
+        payload = {
+            "date": report_date,
+            "feature_key": feature_key,
+            **s,
+            "status": _audit_verdict(s["sample"], s["roi"], s["avg_clv"]),
+            "confidence_adjustment": "",
+            "updated_at": now_local().isoformat(),
+        }
+        post_tracking_event("feature_learning", payload)
+        sent += 1
+    return sent
+
+
+def _send_profile_exports(report_date):
+    rows = _decision_rows_for_date(report_date, graded_only=True)
+    sent = 0
+    profile_buckets = {}
+    for r in rows:
+        p = r.get("profile") or r.get("market_reaction_profile") or "UNCLASSIFIED"
+        profile_buckets.setdefault(p, []).append(r)
+    if ENABLE_PROFILE_SUMMARY_EXPORT:
+        for profile, bucket in sorted(profile_buckets.items(), key=lambda kv: len(kv[1]), reverse=True):
+            s = _summarize_outcome_rows(bucket)
+            payload = {
+                "date": report_date,
+                "profile": profile,
+                **s,
+                "status": _audit_verdict(s["sample"], s["roi"], s["avg_clv"]),
+                "updated_at": now_local().isoformat(),
+            }
+            post_tracking_event("profile_summary", payload)
+            sent += 1
+    if ENABLE_ADAPTIVE_PROFILE_EXPORT:
+        try:
+            config = build_adaptive_config_from_results() or load_adaptive_config()
+        except Exception:
+            config = load_adaptive_config()
+        if isinstance(config, dict):
+            for profile, data in config.items():
+                payload = {"date": report_date, "profile": profile, **(data or {}), "updated_at": now_local().isoformat()}
+                post_tracking_event("adaptive_profile", payload)
+                sent += 1
+    return sent
+
+
+def _send_opportunity_cost_export(report_date):
+    # Uses regret_analysis tab because that is where accepted vs passed decision economics belong.
+    if not ENABLE_REGRET_ANALYSIS:
+        return 0
+    rows = _decision_rows_for_date(report_date, graded_only=True)
+    accepted = [r for r in rows if str(r.get("action") or "").upper() in ["BET_NOW", "TEST_UNIT"]]
+    rejected = [r for r in rows if str(r.get("action") or "").upper() in ["NO_BET", "RESEARCH_ONLY"]]
+    sent = 0
+    for label, bucket in [("accepted_bets", accepted), ("passed_or_research", rejected)]:
+        s = _summarize_outcome_rows(bucket)
+        payload = {
+            "date": report_date,
+            "export_type": "opportunity_cost",
+            "decision_bucket": label,
+            **s,
+            "updated_at": now_local().isoformat(),
+        }
+        post_tracking_event("regret_analysis", payload)
+        sent += 1
+    return sent
+
+
+def send_existing_tab_important_data_exports(report_date=None, force=False):
+    report_date = report_date or today()
+    if not important_export_enabled():
+        print("IMPORTANT DATA EXPORT SKIPPED: webhook disabled or missing.")
+        return False
+    state = _important_state_load()
+    sent_key = f"existing_tab_important_exports_sent_for_{report_date}"
+    if state.get(sent_key) and not force:
+        print(f"IMPORTANT DATA EXPORT SKIPPED: already sent for {report_date}")
+        return False
+    counts = {}
+    try:
+        counts["opportunity_ranking"] = _send_opportunity_ranking_export(report_date)
+        counts["edge_persistence"] = _send_edge_persistence_export(report_date)
+        counts["regret_analysis"] = _send_regret_analysis_export(report_date) + _send_opportunity_cost_export(report_date)
+        counts["feature_learning"] = _send_feature_learning_export(report_date)
+        counts["profile_adaptive"] = _send_profile_exports(report_date)
+        state[sent_key] = {"sent_at": now_local().isoformat(), "counts": counts}
+        _important_state_save(state)
+        print(f"IMPORTANT DATA EXPORT COMPLETE | {report_date} | {counts}")
+        return True
+    except Exception as e:
+        print("IMPORTANT DATA EXPORT ERROR:", repr(e))
+        return False
+
+
+# Wrap the daily report so nightly business-process exports happen with the existing end-of-night routine.
+_v3102_generate_daily_learning_report = generate_daily_learning_report
+
+def generate_daily_learning_report(report_date=None):
+    report_date = report_date or today()
+    report = _v3102_generate_daily_learning_report(report_date)
+    send_existing_tab_important_data_exports(report_date, force=False)
+    return report
 
 
 
