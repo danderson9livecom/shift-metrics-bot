@@ -13,8 +13,8 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V3.10.2
-V4 MARKET EXPECTATION DATA PATCH
+SHIFT MLB V3.10.4
+FINAL GRADING CLOSE LOOP PATCH
 
 Current Production Version
 
@@ -32,6 +32,7 @@ Major V3.10 Business-Process Additions:
 - Better CLV snapshot tracking
 - Capped adaptive confidence adjustments
 - Daily learning reports with stronger evaluation sections
+- V3.10.4 final grading close-loop exports so PENDING rows are completed after FINAL
 
 Core Purpose:
 SHIFT is not just an alert bot. It is a season-long research platform.
@@ -54,10 +55,10 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # SHIFT deployment identity / anti-confusion banner
 # ---------------------------------------------------------------------------
-APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.10.2")
-APP_MODE = "V4 MARKET EXPECTATION DATA PATCH"
+APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.10.4")
+APP_MODE = "FINAL GRADING CLOSE LOOP PATCH"
 APP_BUILD_LABEL = f"SHIFT MLB {APP_VERSION} {APP_MODE}"
-DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-v4-market-expectation-data")
+DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-final-grading-close-loop")
 RUN_EMAIL_TEST_ON_START = os.getenv("RUN_EMAIL_TEST_ON_START", "false").lower() == "true"
 
 TZ = ZoneInfo("America/Phoenix")
@@ -1951,7 +1952,7 @@ def post_tracking_event(event_type, payload):
     body = {
         "event_type": event_type,
         "sent_at": now_local().isoformat(),
-        "source": "SHIFT_MLB_V3_7_1_MARKET_REACTION",
+        "source": APP_BUILD_LABEL,
         "payload": payload,
     }
     headers = {"Content-Type": "application/json"}
@@ -10828,6 +10829,306 @@ def generate_daily_learning_report(report_date=None):
     report = _v3102_generate_daily_learning_report(report_date)
     send_existing_tab_important_data_exports(report_date, force=False)
     return report
+
+
+
+# ---------------------------------------------------------------------------
+# V3.10.4 FINAL GRADING + SHEETS CLOSE-LOOP PATCH
+# ---------------------------------------------------------------------------
+# Purpose:
+# Real-time rows are supposed to start as PENDING. The research loop is not
+# complete until FINAL rows are pushed back to Sheets with result/units,
+# would-have result/units, CLV, actual_remaining_runs, and market_vs_reality_gap.
+#
+# This patch does not change alert logic, thresholds, unit rules, or betting
+# decisions. It only closes the data-collection loop.
+
+APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.10.4")
+APP_MODE = "FINAL GRADING CLOSE LOOP PATCH"
+APP_BUILD_LABEL = f"SHIFT MLB {APP_VERSION} {APP_MODE}"
+DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-final-grading-close-loop")
+
+ENABLE_FINAL_GRADE_SHEETS_EXPORT = os.getenv("ENABLE_FINAL_GRADE_SHEETS_EXPORT", "true").lower() == "true"
+ENABLE_FINAL_GRADE_SHIFT_DECISION_MIRROR = os.getenv("ENABLE_FINAL_GRADE_SHIFT_DECISION_MIRROR", "true").lower() == "true"
+ENABLE_FINAL_GRADE_RESULT_MIRROR = os.getenv("ENABLE_FINAL_GRADE_RESULT_MIRROR", "true").lower() == "true"
+ENABLE_FINAL_GRADE_OPPORTUNITY_MIRROR = os.getenv("ENABLE_FINAL_GRADE_OPPORTUNITY_MIRROR", "true").lower() == "true"
+ENABLE_FINAL_GRADE_EDGE_MIRROR = os.getenv("ENABLE_FINAL_GRADE_EDGE_MIRROR", "true").lower() == "true"
+ENABLE_FINAL_GRADE_REGRET_MIRROR = os.getenv("ENABLE_FINAL_GRADE_REGRET_MIRROR", "true").lower() == "true"
+
+
+def baseball_reality_score_from_row(row):
+    """
+    Research-only composite score.
+    This is not a betting gate. It gives us one clean number to compare against
+    market expectation after the fact.
+    """
+    row = row or {}
+    side = str(row.get("side") or "").upper()
+
+    p2r = safe_float(row.get("pressure_to_runs"), 0)
+    conv = safe_float(row.get("run_conversion"), 0)
+    traffic = safe_float(row.get("traffic_conversion"), 0)
+    stress = safe_float(row.get("pitcher_stress"), 0)
+    contact = safe_float(row.get("contact_quality"), 0)
+    bullpen_risk = safe_float(row.get("bullpen_risk"), 0)
+    run_prev = safe_float(row.get("run_prevention"), 0)
+    k_env = safe_float(row.get("strikeout_environment"), 0)
+    bp_lock = safe_float(row.get("bullpen_lockdown"), 0)
+
+    if side == "UNDER":
+        score = (
+            run_prev * 0.30
+            + k_env * 0.22
+            + bp_lock * 0.18
+            + max(0, 100 - contact) * 0.12
+            + max(0, 100 - traffic) * 0.10
+            + max(0, 100 - stress) * 0.08
+        )
+    else:
+        score = (
+            p2r * 0.26
+            + conv * 0.22
+            + traffic * 0.18
+            + stress * 0.14
+            + contact * 0.12
+            + bullpen_risk * 0.08
+        )
+    return round(clamp(score), 1)
+
+
+def _v3104_runs_at_evaluation(row):
+    parsed = score_total_from_text((row or {}).get("score"))
+    if parsed is not None:
+        return parsed
+    return safe_float((row or {}).get("runs_at_evaluation"), 0)
+
+
+def _v3104_fill_market_reality_fields(row, final_total):
+    """
+    Finalize the four market-expectation fields for any decision row.
+    """
+    row = row or {}
+    runs_at_eval = _v3104_runs_at_evaluation(row)
+
+    if str(row.get("market_implied_remaining_runs", "")).strip() in ["", "None"]:
+        row["market_implied_remaining_runs"] = market_implied_remaining_runs_value(
+            row.get("live_total") or row.get("line"),
+            runs_at_eval,
+        )
+
+    actual_remaining = round(safe_float(final_total, 0) - safe_float(runs_at_eval, 0), 2)
+    row["actual_remaining_runs"] = actual_remaining
+
+    implied = safe_float(row.get("market_implied_remaining_runs"), None)
+    if implied is not None:
+        row["market_vs_reality_gap"] = round(implied - actual_remaining, 2)
+
+    if str(row.get("baseball_reality_score", "")).strip() in ["", "None"]:
+        row["baseball_reality_score"] = baseball_reality_score_from_row(row)
+
+    return row
+
+
+# Preserve whatever fieldnames existed, then add the close-loop fields.
+_v3104_decision_log_fieldnames = decision_log_fieldnames
+
+def decision_log_fieldnames():
+    fields = list(_v3104_decision_log_fieldnames())
+    for f in [
+        "baseball_reality_score",
+        "final_grade_exported_at",
+        "final_grade_export_count",
+    ]:
+        if f not in fields:
+            fields.append(f)
+    return fields
+
+
+# Add baseball_reality_score to all new real-time decision rows.
+_v3104_decision_row_from_opportunity = decision_row_from_opportunity
+
+def decision_row_from_opportunity(info, market_context, opportunity, action, decision_type="", reject_reason=""):
+    row = _v3104_decision_row_from_opportunity(info, market_context, opportunity, action, decision_type, reject_reason)
+    if "baseball_reality_score" not in row or str(row.get("baseball_reality_score", "")).strip() in ["", "None"]:
+        row["baseball_reality_score"] = baseball_reality_score_from_row(row)
+    return row
+
+
+# Add baseball_reality_score to existing-tab export payloads.
+_v3104_decision_event_base = _decision_event_base
+
+def _decision_event_base(row, report_date=None, export_type=""):
+    payload = _v3104_decision_event_base(row, report_date, export_type)
+    payload["baseball_reality_score"] = (row or {}).get("baseball_reality_score") or baseball_reality_score_from_row(row or {})
+    payload["final_grade_exported_at"] = (row or {}).get("final_grade_exported_at", "")
+    return payload
+
+
+def _v3104_post_final_grade_to_sheets(row, report_date=None):
+    """
+    Append final-grade rows back into the existing Sheets tabs.
+    Sheets are append-only unless the Apps Script does upserts, so final-grade
+    rows are intentionally exported as a new export_type instead of trying to
+    mutate the original PENDING row.
+    """
+    if not (ENABLE_FINAL_GRADE_SHEETS_EXPORT and tracking_webhook_enabled()):
+        return 0
+
+    row = row or {}
+    report_date = report_date or row.get("date") or today()
+    payload = _decision_event_base(row, report_date, "final_grade")
+    sent = 0
+
+    if ENABLE_FINAL_GRADE_SHIFT_DECISION_MIRROR:
+        if post_tracking_event("shift_decision", payload):
+            sent += 1
+
+    if ENABLE_FINAL_GRADE_RESULT_MIRROR:
+        graded_payload = dict(payload)
+        graded_payload["source_decision_type"] = row.get("action", "")
+        graded_payload["result_source"] = "would_have" if str(row.get("action") or "").upper() == "NO_BET" else "actual_or_model"
+        if post_tracking_event("graded_result", graded_payload):
+            sent += 1
+
+    if ENABLE_FINAL_GRADE_OPPORTUNITY_MIRROR and "_opportunity_score" in globals():
+        opp_payload = dict(payload)
+        opp_payload["opportunity_score"] = _opportunity_score(row)
+        opp_payload["board_rank"] = row.get("board_rank", "")
+        opp_payload["top_5_flag"] = row.get("top_5_flag", "")
+        if post_tracking_event("opportunity_ranking", opp_payload):
+            sent += 1
+
+    if ENABLE_FINAL_GRADE_EDGE_MIRROR:
+        edge_payload = dict(payload)
+        edge_payload.update({
+            "edge_first_seen": row.get("edge_first_seen") or row.get("timestamp"),
+            "edge_last_seen": row.get("edge_last_seen") or row.get("graded_at") or row.get("timestamp"),
+            "edge_duration_seconds": row.get("edge_duration_seconds") or "",
+            "max_edge_seen": row.get("max_edge_seen") or row.get("edge"),
+            "opening_to_alert_move": row.get("market_reaction_move") or row.get("opening_to_alert_move"),
+            "alert_to_close_move": row.get("clv") or row.get("alert_to_close_move"),
+            "best_clv_seen": row.get("best_clv_seen") or row.get("clv"),
+            "worst_clv_seen": row.get("worst_clv_seen") or row.get("clv"),
+            "beat_market": row.get("beat_market"),
+        })
+        if post_tracking_event("edge_persistence", edge_payload):
+            sent += 1
+
+    if ENABLE_FINAL_GRADE_REGRET_MIRROR and str(row.get("action") or "").upper() == "NO_BET":
+        regret_payload = dict(payload)
+        regret_payload["export_type"] = "final_no_bet_grade"
+        regret_payload["regret_flag"] = row.get("regret_flag", "YES")
+        regret_payload["missed_value_reason"] = row.get("missed_value_reason") or row.get("reject_reason")
+        if post_tracking_event("regret_analysis", regret_payload):
+            sent += 1
+
+    return sent
+
+
+# Replace the prior grading function with a close-loop version.
+_v3104_previous_grade_completed_decision_log = grade_completed_decision_log
+
+def grade_completed_decision_log(game_pk, label, final_score):
+    """
+    Grade every decision row when a game goes final and immediately export the
+    final-grade rows to Sheets.
+
+    This is the fix for rows staying PENDING in Sheets:
+    - Real-time rows remain PENDING when created.
+    - Final-grade rows are appended after FINAL with result/units/would-have fields.
+    """
+    if not ENABLE_DECISION_LOG:
+        return
+
+    # Keep any prior side effects/adaptive behavior from the existing function.
+    try:
+        _v3104_previous_grade_completed_decision_log(game_pk, label, final_score)
+    except Exception as e:
+        print("PREVIOUS DECISION GRADER ERROR:", repr(e))
+
+    final_total = final_total_from_score(final_score)
+    if final_total is None:
+        return
+
+    rows = csv_read_rows(DECISION_LOG_FILE)
+    if not rows:
+        return
+
+    changed = False
+    graded_rows = []
+    for row in rows:
+        same_game = (
+            str(row.get("game_pk")) == str(game_pk)
+            or row.get("game") == label
+            or row.get("game_key") == f"{row.get('date') or today()}::{label}"
+            or row.get("game_key") == f"{today()}::{label}"
+        )
+        if not same_game:
+            continue
+
+        side = str(row.get("side", "")).upper()
+        line = safe_float(row.get("line"), None)
+        if side not in ["OVER", "UNDER"] or line is None:
+            continue
+
+        result = grade_bet(side, line, final_total)
+        units = american_odds_profit_units(row.get("price"), result)
+
+        row["final_score"] = final_score
+        row["final_total"] = final_total
+        row["result"] = result
+        row["units"] = units
+        row["graded_at"] = row.get("graded_at") or now_local().isoformat()
+
+        # CLV close fallback if polling never captured a usable close.
+        if str(row.get("clv", "")).strip() in ["", "None"]:
+            close_est = safe_float(row.get("closing_total_estimate"), None)
+            if close_est is None:
+                close_est = safe_float(row.get("last_live_total"), None)
+            if close_est is not None:
+                row["clv"] = round(close_est - line, 2) if side == "OVER" else round(line - close_est, 2)
+
+        clv = safe_float(row.get("clv"), None)
+        if clv is not None:
+            row["beat_market"] = "TRUE" if clv > 0 else "FALSE"
+            row["alert_to_close_move"] = clv
+            old_best = safe_float(row.get("best_clv_seen"), None)
+            old_worst = safe_float(row.get("worst_clv_seen"), None)
+            row["best_clv_seen"] = clv if old_best is None else max(old_best, clv)
+            row["worst_clv_seen"] = clv if old_worst is None else min(old_worst, clv)
+
+        if str(row.get("action") or "").upper() == "NO_BET":
+            row["regret_flag"] = "YES"
+            row["would_have_result"] = result
+            row["would_have_units"] = units
+            row["missed_value_reason"] = row.get("missed_value_reason") or row.get("reject_reason")
+        else:
+            row["actual_result"] = result if row.get("actual_bet_placed") else row.get("actual_result", result)
+
+        _v3104_fill_market_reality_fields(row, final_total)
+
+        # Only export the final grade once per row.
+        if str(row.get("final_grade_exported_at", "")).strip() in ["", "None"]:
+            row["final_grade_exported_at"] = now_local().isoformat()
+            row["final_grade_export_count"] = safe_int(row.get("final_grade_export_count"), 0) + 1
+            graded_rows.append(dict(row))
+
+        changed = True
+
+    if changed:
+        csv_write_rows(DECISION_LOG_FILE, decision_log_fieldnames(), rows)
+        try:
+            build_adaptive_config_from_results()
+        except Exception as e:
+            print("ADAPTIVE CONFIG AFTER FINAL GRADE ERROR:", repr(e))
+
+    if graded_rows:
+        exported = 0
+        for r in graded_rows:
+            exported += _v3104_post_final_grade_to_sheets(r, r.get("date") or today())
+        print(f"FINAL GRADE SHEETS EXPORT | {label} | rows={len(graded_rows)} | events={exported} | final={final_score}")
+    else:
+        print(f"FINAL GRADE COMPLETE | {label} | no new rows to export | final={final_score}")
 
 
 
