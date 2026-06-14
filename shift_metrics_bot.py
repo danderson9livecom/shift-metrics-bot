@@ -13,8 +13,8 @@ from dotenv import load_dotenv
 from twilio.rest import Client
 
 """
-SHIFT MLB V3.10.4
-FINAL GRADING CLOSE LOOP PATCH
+SHIFT MLB V3.10.5
+PROFESSIONAL DATA INTEGRITY PATCH
 
 Current Production Version
 
@@ -33,6 +33,7 @@ Major V3.10 Business-Process Additions:
 - Capped adaptive confidence adjustments
 - Daily learning reports with stronger evaluation sections
 - V3.10.4 final grading close-loop exports so PENDING rows are completed after FINAL
+- V3.10.5 professional data integrity: CLV normalization and outcome-field feature exclusion
 
 Core Purpose:
 SHIFT is not just an alert bot. It is a season-long research platform.
@@ -55,10 +56,10 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # SHIFT deployment identity / anti-confusion banner
 # ---------------------------------------------------------------------------
-APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.10.4")
-APP_MODE = "FINAL GRADING CLOSE LOOP PATCH"
+APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.10.5")
+APP_MODE = "PROFESSIONAL DATA INTEGRITY PATCH"
 APP_BUILD_LABEL = f"SHIFT MLB {APP_VERSION} {APP_MODE}"
-DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-final-grading-close-loop")
+DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-professional-data-integrity")
 RUN_EMAIL_TEST_ON_START = os.getenv("RUN_EMAIL_TEST_ON_START", "false").lower() == "true"
 
 TZ = ZoneInfo("America/Phoenix")
@@ -269,6 +270,13 @@ TRACKING_WEBHOOK_SECRET = os.getenv("TRACKING_WEBHOOK_SECRET", "").strip()
 ENABLE_TRACKING_WEBHOOK = os.getenv("ENABLE_TRACKING_WEBHOOK", "false").lower() == "true"
 ENABLE_CLV_POLL_SNAPSHOTS = os.getenv("ENABLE_CLV_POLL_SNAPSHOTS", "true").lower() == "true"
 CLV_SNAPSHOT_MIN_MOVE = float(os.getenv("CLV_SNAPSHOT_MIN_MOVE", "0.5"))
+
+# V3.10.5 data integrity controls:
+# CLV is a market-movement field, not a final-score field. These controls prevent
+# final totals from accidentally being written as closing-line value.
+ENABLE_CLV_DATA_INTEGRITY = os.getenv("ENABLE_CLV_DATA_INTEGRITY", "true").lower() == "true"
+MAX_REASONABLE_CLV_RUNS = float(os.getenv("MAX_REASONABLE_CLV_RUNS", "6.0"))
+CLV_INVALID_VALUE = os.getenv("CLV_INVALID_VALUE", "").strip()
 ENABLE_ACTIONABLE_DAILY_RECOMMENDATIONS = os.getenv("ENABLE_ACTIONABLE_DAILY_RECOMMENDATIONS", "true").lower() == "true"
 MIN_RECOMMENDATION_SAMPLE = int(os.getenv("MIN_RECOMMENDATION_SAMPLE", "2"))
 
@@ -10843,10 +10851,10 @@ def generate_daily_learning_report(report_date=None):
 # This patch does not change alert logic, thresholds, unit rules, or betting
 # decisions. It only closes the data-collection loop.
 
-APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.10.4")
-APP_MODE = "FINAL GRADING CLOSE LOOP PATCH"
+APP_VERSION = os.getenv("SHIFT_APP_VERSION", "V3.10.5")
+APP_MODE = "PROFESSIONAL DATA INTEGRITY PATCH"
 APP_BUILD_LABEL = f"SHIFT MLB {APP_VERSION} {APP_MODE}"
-DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-final-grading-close-loop")
+DEPLOY_MARKER = os.getenv("DEPLOY_MARKER", f"{APP_VERSION}-professional-data-integrity")
 
 ENABLE_FINAL_GRADE_SHEETS_EXPORT = os.getenv("ENABLE_FINAL_GRADE_SHEETS_EXPORT", "true").lower() == "true"
 ENABLE_FINAL_GRADE_SHIFT_DECISION_MIRROR = os.getenv("ENABLE_FINAL_GRADE_SHIFT_DECISION_MIRROR", "true").lower() == "true"
@@ -11129,6 +11137,263 @@ def grade_completed_decision_log(game_pk, label, final_score):
         print(f"FINAL GRADE SHEETS EXPORT | {label} | rows={len(graded_rows)} | events={exported} | final={final_score}")
     else:
         print(f"FINAL GRADE COMPLETE | {label} | no new rows to export | final={final_score}")
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# V3.10.5 PROFESSIONAL DATA INTEGRITY PATCH
+# ---------------------------------------------------------------------------
+# Purpose:
+# 1) Keep CLV on one professional scale: runs of market movement, not final score.
+# 2) Prevent outcome-only fields from being treated as predictive features.
+# 3) Keep final grading and Sheets exports stable while cleaning rows before export.
+#
+# Important:
+# This patch does NOT change betting thresholds, alert logic, profile promotion,
+# units, or SMS behavior. It only improves data quality for research.
+
+OUTCOME_ONLY_FEATURE_FIELDS = {
+    "final_score", "final_total", "result", "units", "actual_result",
+    "would_have_result", "would_have_units", "graded_at", "actual_remaining_runs",
+    "market_vs_reality_gap", "final_grade_exported_at", "result_source",
+}
+
+CLV_FIELD_NAMES = ["clv", "alert_to_close_move", "best_clv_seen", "worst_clv_seen"]
+
+
+def _v3105_is_blank(value):
+    return str(value).strip() in ["", "None", "nan", "NaN", "null", "NULL"]
+
+
+def normalize_clv_runs(value, row=None):
+    """
+    Return CLV in runs, or None if the value is not a trustworthy CLV.
+
+    CLV must mean:
+        OVER: current/close market total - alert line
+        UNDER: alert line - current/close market total
+
+    It must NOT mean:
+        final_total - alert line
+
+    The earlier exports showed occasional values like -10. Those are not usable
+    CLV observations for live totals, so this removes them from learning rather
+    than letting them distort avg_clv/profile decisions.
+    """
+    if _v3105_is_blank(value):
+        return None
+    try:
+        v = float(value)
+    except Exception:
+        return None
+
+    # Guardrail: true CLV in live totals can move, but values beyond this range
+    # are usually final-score leakage or bad close data.
+    if ENABLE_CLV_DATA_INTEGRITY and abs(v) > MAX_REASONABLE_CLV_RUNS:
+        return None
+
+    return round(v, 2)
+
+
+def clean_clv_fields(row):
+    """
+    Clean CLV-related fields in a row in-place and return the row.
+    Invalid CLV values are blanked so summaries exclude them instead of counting
+    them as zero or as final-score movement.
+    """
+    row = dict(row or {})
+    if not ENABLE_CLV_DATA_INTEGRITY:
+        return row
+
+    for field in CLV_FIELD_NAMES:
+        if field not in row:
+            continue
+        val = normalize_clv_runs(row.get(field), row)
+        row[field] = CLV_INVALID_VALUE if val is None else val
+
+    # beat_market must be based on trustworthy CLV only.
+    clv = normalize_clv_runs(row.get("clv"), row)
+    if clv is None:
+        row["beat_market"] = ""
+    else:
+        row["beat_market"] = "TRUE" if clv > 0 else "FALSE"
+
+    return row
+
+
+def _v3105_sanitize_decision_rows_for_game(rows, game_pk=None, label=None):
+    cleaned = []
+    changed = False
+    for row in rows or []:
+        same_game = True
+        if game_pk is not None or label is not None:
+            same_game = (
+                (game_pk is not None and str(row.get("game_pk")) == str(game_pk))
+                or (label is not None and row.get("game") == label)
+                or (label is not None and row.get("game_key") == f"{row.get('date') or today()}::{label}")
+                or (label is not None and row.get("game_key") == f"{today()}::{label}")
+            )
+        if same_game:
+            before = {k: row.get(k) for k in CLV_FIELD_NAMES + ["beat_market"]}
+            row = clean_clv_fields(row)
+            after = {k: row.get(k) for k in CLV_FIELD_NAMES + ["beat_market"]}
+            if before != after:
+                changed = True
+        cleaned.append(row)
+    return cleaned, changed
+
+
+# Exclude post-game/outcome fields from feature-audit exports.
+# market_implied_remaining_runs stays because it is known at decision time.
+try:
+    CORE_VARIABLES_FOR_AUDIT = [
+        v for v in CORE_VARIABLES_FOR_AUDIT
+        if v not in OUTCOME_ONLY_FEATURE_FIELDS
+    ]
+except Exception:
+    pass
+
+
+# Override summaries so CLV samples only include valid, normalized CLV values.
+_v3105_previous_summarize_units_and_clv = _summarize_units_and_clv if "_summarize_units_and_clv" in globals() else None
+
+
+def _summarize_units_and_clv(rows):
+    rows = rows or []
+    w, l, p, pct, units = summarize_record(rows)
+    clvs = []
+    for r in rows:
+        c = normalize_clv_runs((r or {}).get("clv"), r)
+        if c is not None:
+            clvs.append(c)
+    avg_clv = round(avg(clvs), 2) if clvs else ""
+    clv_sample = len(clvs)
+    return w, l, p, pct, units, avg_clv, clv_sample
+
+
+_v3105_previous_summarize_outcome_rows = _summarize_outcome_rows if "_summarize_outcome_rows" in globals() else None
+
+
+def _summarize_outcome_rows(rows):
+    wins = losses = pushes = 0
+    units = 0.0
+    clvs = []
+    for r in rows or []:
+        res, u = _row_result_and_units(r)
+        if res == "WIN":
+            wins += 1
+        elif res == "LOSS":
+            losses += 1
+        elif res == "PUSH":
+            pushes += 1
+        else:
+            continue
+        units += safe_float(u, 0)
+        c = normalize_clv_runs((r or {}).get("clv"), r)
+        if c is not None:
+            clvs.append(c)
+    sample = wins + losses + pushes
+    win_pct = round((wins / max(1, wins + losses)) * 100, 1) if (wins + losses) else 0
+    roi = round(units / max(1, wins + losses), 4) if (wins + losses) else 0
+    avg_clv = round(avg(clvs), 2) if clvs else 0.0
+    return {
+        "sample": sample, "wins": wins, "losses": losses, "pushes": pushes,
+        "win_pct": win_pct, "units": round(units, 2), "roi": roi,
+        "avg_clv": avg_clv, "clv_sample": len(clvs),
+    }
+
+
+# Override final grade export wrapper so every outgoing final row is cleaned first.
+_v3105_previous_post_final_grade_to_sheets = _v3104_post_final_grade_to_sheets if "_v3104_post_final_grade_to_sheets" in globals() else None
+
+
+def _v3104_post_final_grade_to_sheets(row, report_date=None):
+    row = clean_clv_fields(dict(row or {}))
+    if _v3105_previous_post_final_grade_to_sheets:
+        return _v3105_previous_post_final_grade_to_sheets(row, report_date)
+    return 0
+
+
+# Override feature export to protect against any future accidental outcome-only variables.
+_v3105_previous_send_feature_learning_export = _send_feature_learning_export if "_send_feature_learning_export" in globals() else None
+
+
+def _send_feature_learning_export(report_date):
+    if not ENABLE_FEATURE_LEARNING_EXPORT:
+        return 0
+    rows = [clean_clv_fields(r) for r in _decision_rows_for_date(report_date, graded_only=True)]
+    buckets = {}
+    for r in rows:
+        tags = [t for t in str(r.get("pattern_tags") or "").split("|") if t]
+        for tag in tags:
+            buckets.setdefault("TAG:" + tag, []).append(r)
+
+        state_id = str(r.get("market_state_id") or "").strip()
+        if state_id:
+            buckets.setdefault("MARKET_STATE:" + state_id, []).append(r)
+
+        for var in CORE_VARIABLES_FOR_AUDIT:
+            if var in OUTCOME_ONLY_FEATURE_FIELDS:
+                continue
+            val = safe_float(r.get(var), None)
+            if val is None:
+                continue
+            if var in ["edge", "expected_value", "line_velocity", "market_reaction_move", "market_discount"]:
+                if abs(val) >= 3:
+                    bucket = "HIGH_ABS"
+                elif abs(val) >= 1:
+                    bucket = "MID_ABS"
+                else:
+                    bucket = "LOW_ABS"
+            else:
+                if val >= 85:
+                    bucket = "85_PLUS"
+                elif val >= 70:
+                    bucket = "70_84"
+                elif val >= 55:
+                    bucket = "55_69"
+                else:
+                    bucket = "UNDER_55"
+            buckets.setdefault(f"{var}:{bucket}", []).append(r)
+
+    sent = 0
+    for feature_key, bucket_rows in sorted(buckets.items(), key=lambda kv: len(kv[1]), reverse=True)[:IMPORTANT_EXPORT_TOP_N * 2]:
+        s = _summarize_outcome_rows(bucket_rows)
+        payload = {
+            "date": report_date,
+            "feature_key": feature_key,
+            **s,
+            "status": _audit_verdict(s["sample"], s["roi"], s["avg_clv"]),
+            "confidence_adjustment": "",
+            "updated_at": now_local().isoformat(),
+        }
+        post_tracking_event("feature_learning", payload)
+        sent += 1
+    return sent
+
+
+# Final grader wrapper: keep the V3.10.4 final close-loop, then sanitize CLV
+# in the durable decision database so future exports/reports use clean values.
+_v3105_previous_grade_completed_decision_log = grade_completed_decision_log if "grade_completed_decision_log" in globals() else None
+
+
+def grade_completed_decision_log(game_pk, label, final_score):
+    if _v3105_previous_grade_completed_decision_log:
+        _v3105_previous_grade_completed_decision_log(game_pk, label, final_score)
+
+    if not (ENABLE_DECISION_LOG and ENABLE_CLV_DATA_INTEGRITY):
+        return
+
+    rows = csv_read_rows(DECISION_LOG_FILE)
+    if not rows:
+        return
+
+    rows, changed = _v3105_sanitize_decision_rows_for_game(rows, game_pk=game_pk, label=label)
+    if changed:
+        csv_write_rows(DECISION_LOG_FILE, decision_log_fieldnames(), rows)
+        print(f"V3.10.5 CLV DATA INTEGRITY CLEANED | {label} | Final {final_score}")
 
 
 
